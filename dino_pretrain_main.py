@@ -214,7 +214,7 @@ def train_dino(args):
     plt.title("Pretraining Loss Curve")
     plt.legend()
     plt.grid(True)
-    save_path = Path(args.data_path).parent / "pretrain_loss_curve.png"
+    save_path = Path(args.output_dir).parent / "pretrain_loss_curve.png"
     plt.savefig(str(save_path))
     plt.close()
     total_time = str(datetime.timedelta(seconds=int(time.time() - start_time)))
