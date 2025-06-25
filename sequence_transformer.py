@@ -1,85 +1,105 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-
-class TokenType:
-    ACTION = "A"
-    STATE = "S"
-    DECISION = "D"
-    PAD = "PAD"
-
+import math
 
 class ASDTransformer(nn.Module):
     def __init__(self, 
                  embed_dim=256, 
-                 num_layers=6, 
-                 num_heads=8,
-                 dropout=0.1, 
-                 max_len=150,
+                 num_heads=8, 
+                 depth=6, 
+                 mlp_ratio=4.0, 
+                 dropout=0.1,
                  num_decision_classes=4,
-                 action_output_dim=1,
-                 output_mode='dino'):
+                 max_seq_len=150,
+                 mode='pretrain'  # 'pretrain' or 'finetune'
+                ):
         super().__init__()
 
         self.embed_dim = embed_dim
-        self.max_len = max_len
-        self.output_mode = output_mode
+        self.mode = mode
 
-        # === Embedding ===
-        self.action_embedding = nn.Embedding(100, embed_dim)   # 100 是假设动作种类数，可调整
-        self.decision_embedding = nn.Embedding(num_decision_classes, embed_dim)
-        self.dis_embedding = nn.Embedding(50, embed_dim)       # 距离状态类别数，可调整
-        self.v_embedding = nn.Embedding(50, embed_dim)         # 速度状态类别数，可调整
+        # === Embedding layers ===
+        self.action_embed = nn.Linear(1, embed_dim)
+        self.dis_embed = nn.Linear(10, embed_dim)
+        self.v_embed = nn.Linear(3, embed_dim)
+        self.decision_embed = nn.Embedding(num_embeddings=num_decision_classes, embedding_dim=embed_dim)
 
-        # === Positional Embedding ===
-        self.pos_embedding = nn.Parameter(torch.randn(max_len, embed_dim))
+        # === Positional embedding ===
+        self.pos_embed = nn.Parameter(torch.zeros(1, max_seq_len + 1, embed_dim))  # +1 for cls_token
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
-        # === Transformer Encoder ===
-        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dropout=dropout, batch_first=True)
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        # === CLS token ===
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
 
-        # === Heads ===
-        if output_mode == 'finetune' or output_mode == 'both':
-            self.decision_head = nn.Sequential(
-                nn.LayerNorm(embed_dim),
-                nn.Linear(embed_dim, num_decision_classes)
-            )
-            self.action_head = nn.Sequential(
-                nn.LayerNorm(embed_dim),
-                nn.Linear(embed_dim, action_output_dim)
-            )
+        # === Transformer encoder ===
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim, 
+            nhead=num_heads, 
+            dim_feedforward=int(embed_dim * mlp_ratio),
+            dropout=dropout, 
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=depth)
 
-    def forward(self, tokens):
-        # === Token Embedding ===
-        embeddings = []
-        for token in tokens:
-            t_type = token["type"]
-            val = token["value"]
-            if t_type == TokenType.ACTION:
-                embeddings.append(self.action_embedding(torch.tensor(val)))
-            elif t_type == TokenType.DECISION:
-                embeddings.append(self.decision_embedding(torch.tensor(val)))
-            elif t_type == TokenType.STATE:
-                dis = val["dis"]
-                v = val["v"]
-                dis_emb = self.dis_embedding(torch.tensor(dis))
-                v_emb = self.v_embedding(torch.tensor(v))
-                embeddings.append(dis_emb + v_emb)
-            elif t_type == TokenType.PAD:
-                embeddings.append(torch.zeros(self.embed_dim))
+        # === Output heads ===
+        self.decision_head = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, num_decision_classes)  # 分类
+        )
 
-        x = torch.stack(embeddings).unsqueeze(0)  # shape: [1, seq_len, embed_dim]
-        x = x + self.pos_embedding[:x.size(1)]
-        x_encoded = self.encoder(x)
+        self.action_head = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, 1)  # 回归
+        )
 
-        # 取最后一个 D/A 位置的输出作为预测输入
-        outputs = {"representation": x_encoded}  # 用于对比学习
+    def forward(self, input_tokens):
+        """
+        input_tokens: [B, T] of list of dicts with keys: type, value
+        """
+        B, T = len(input_tokens), len(input_tokens[0])
+        device = self.cls_token.device
 
-        if self.output_mode in ['finetune', 'both']:
-            d_feat = x_encoded[0, -2]  # 倒数第二位是 D
-            a_feat = x_encoded[0, -1]  # 倒数第一位是 A
-            outputs["decision_logits"] = self.decision_head(d_feat)
-            outputs["action_pred"] = self.action_head(a_feat)
+        # === Token embedding ===
+        embeds = []
+        for batch in input_tokens:
+            embed_seq = []
+            for token in batch:
+                if token['type'] == 'A':
+                    val = torch.tensor(token['value'], dtype=torch.float32, device=device).view(1, 1)
+                    embed = self.action_embed(val)
+                elif token['type'] == 'S':
+                    dis = torch.tensor(token['value']['dis'], dtype=torch.float32, device=device).view(1, -1)
+                    v = torch.tensor(token['value']['v'], dtype=torch.float32, device=device).view(1, -1)
+                    embed = self.dis_embed(dis) + self.v_embed(v)
+                elif token['type'] == 'D':
+                    val = torch.tensor(token['value'], dtype=torch.long, device=device).view(1)
+                    embed = self.decision_embed(val)
+                else:  # PAD or unknown
+                    embed = torch.zeros(1, self.embed_dim, device=device)
+                embed_seq.append(embed)
+            embed_seq = torch.cat(embed_seq, dim=0)  # [T, D]
+            embeds.append(embed_seq)
 
-        return outputs
+        x = torch.stack(embeds, dim=0)  # [B, T, D]
+
+        # === CLS token prepend ===
+        cls_tokens = self.cls_token.expand(B, -1, -1)  # [B, 1, D]
+        x = torch.cat((cls_tokens, x), dim=1)  # [B, T+1, D]
+
+        # === Positional embedding ===
+        x = x + self.pos_embed[:, :x.size(1), :]
+
+        # === Transformer ===
+        x = self.transformer(x)  # [B, T+1, D]
+
+        # === Output ===
+        cls_output = x[:, 0, :]  # [B, D]
+
+        decision_logits = self.decision_head(cls_output)
+        action_pred = self.action_head(cls_output)
+
+        return {
+            "decision_logits": decision_logits,
+            "action_pred": action_pred
+        }
