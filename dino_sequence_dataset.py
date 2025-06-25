@@ -1,73 +1,110 @@
 import torch
 from torch.utils.data import Dataset
+from parameter import TEACHER_TOKEN_LIMIT, STUDENT_TOKEN_LIMIT
 
 class DinoSequenceDataset(Dataset):
-    def __init__(self, data_path, max_teacher_tokens=150, max_student_tokens=89):
+    def __init__(self, data_path, mode='pretrain', 
+                 max_teacher_tokens=TEACHER_TOKEN_LIMIT, 
+                 max_student_tokens=STUDENT_TOKEN_LIMIT - 1):
         self.data = torch.load(data_path)
+        assert mode in ['pretrain', 'finetune', 'val']
+        self.mode = mode
         self.max_teacher_tokens = max_teacher_tokens
         self.max_student_tokens = max_student_tokens
 
     def __len__(self):
         return len(self.data)
 
-    def pad_right(self, seq, target_len):
-        pad_token = {"type": "PAD", "value": None}
-        mask = [1] * len(seq) + [0] * (target_len - len(seq))
-        padded = seq + [pad_token] * (target_len - len(seq))
-        return padded[:target_len], mask[:target_len]
-
     def pad_left(self, seq, target_len):
         pad_token = {"type": "PAD", "value": None}
         pad_len = target_len - len(seq)
-        mask = [0] * pad_len + [1] * len(seq)
+        if pad_len > 0:
+            print(f"[Padding] Added {pad_len} PAD tokens")
         padded = [pad_token] * pad_len + seq
+        mask = [0] * pad_len + [1] * len(seq)
         return padded[-target_len:], mask[-target_len:]
 
     def __getitem__(self, idx):
         item = self.data[idx]
-        print("item",item.keys())
+        print(f"[Processing] Sample {idx}")
         token_seq = item['seq']
         person_id = item['person_id']
         exp_id = item['exp_id']
-        ts_seq = item['ts_seq']
+        ts = item['ts']
 
-        # teacher: left-aligned full sequence
-        teacher_seq, teacher_mask = self.pad_left(token_seq, self.max_teacher_tokens)
+        if self.mode == 'finetune':
+            max_tokens = self.max_student_tokens
+        else:
+            max_tokens = self.max_teacher_tokens
 
-        # student: right-aligned partial sequence (trailing part)
-        student_raw = token_seq[-self.max_student_tokens:]
-        student_seq, student_mask = self.pad_left(student_raw, self.max_student_tokens)
+        raw_seq = token_seq[-max_tokens:]
+        input_len = max_tokens
 
-        # 预测目标：student 的下一个 D（第 90 个）和 A（第 91 个）
-        d_index = -self.max_student_tokens + self.max_student_tokens  # = 0
-        target_d = token_seq[d_index] if len(token_seq) > self.max_student_tokens and token_seq[d_index]['type'] == 'D' else None
+        padded_seq, mask = self.pad_left(raw_seq, input_len)
 
+        # student 是 teacher 的前段子序列
+        if self.mode == 'finetune':
+            student_seq, student_mask = padded_seq, mask
+            teacher_seq = teacher_mask = None
+        else:
+            student_seq, student_mask = padded_seq[:self.max_student_tokens], mask[:self.max_student_tokens]
+            teacher_seq, teacher_mask = padded_seq, mask
+
+        # 提取目标位置：student 最后位置的 D 和下一个的 A
+        d_index = self.max_student_tokens
         a_index = d_index + 1
-        target_a = token_seq[a_index] if len(token_seq) > self.max_student_tokens + 1 and token_seq[a_index]['type'] == 'A' else None
+        full_seq = padded_seq if self.mode != 'finetune' else token_seq
+        target_d = full_seq[d_index] if d_index < len(full_seq) and full_seq[d_index]['type'] == 'D' else None
+        target_a = full_seq[a_index] if a_index < len(full_seq) and full_seq[a_index]['type'] == 'A' else None
 
-        return {
+        output = {
             "student_seq": student_seq,
             "student_mask": student_mask,
-            "teacher_seq": teacher_seq,
-            "teacher_mask": teacher_mask,
             "target_d": target_d,
             "target_a": target_a,
             "person_id": person_id,
             "exp_id": exp_id,
-            "ts_seq": ts_seq
+            "ts": ts
         }
+
+        if self.mode == 'pretrain':
+            output.update({
+                "teacher_seq": teacher_seq,
+                "teacher_mask": teacher_mask,
+            })
+
+        return output
 
 
 if __name__ == "__main__":
     # 用法示例：
-    dataset = DinoSequenceDataset("../dino_data/dino_sequence_data/pretrain.pt")
-    sample = dataset[0]
-    print("len",len(sample['teacher_seq']),len(sample['student_seq']))
-    print("teacher_seq:", sample['teacher_seq'])
-    print("student_seq:", sample['student_seq'])
-    print("target_d:", sample['target_d'])
-    print("target_a:", sample['target_a'])
-    print("person_id:", sample['person_id'])
-    print("exp_id:", sample['exp_id'])
-    print("ts_seq:", sample['ts_seq'])
+    # 加载 pretrain 数据
+
+    pretrain_dataset = DinoSequenceDataset("../dino_data/dino_sequence_data/pretrain.pt", mode='pretrain')
+    for i in range(100):
+        sample = pretrain_dataset[i]
+    sample = pretrain_dataset[7]
+    print("--------------len",len(sample['teacher_seq']),len(sample['student_seq']))
+    print("--------------teacher_seq:", sample['teacher_seq'])
+    print("----------------student_seq:", sample['student_seq'])
+    print("---------------target_d:", sample['target_d'])
+    print("----------------target_a:", sample['target_a'])
+    print("----------------person_id:", sample['person_id'])
+    print("----------------exp_id:", sample['exp_id'])
+    print("----------------ts:", sample['ts'])
+
+    # 加载 finetune 数据
+
+    # finetune_dataset = DinoSequenceDataset("../dino_data/dino_sequence_data/finetune.pt", mode='finetune')
+    # for i in range(100):
+    #     sample = finetune_dataset[i]
+    # sample = finetune_dataset[51]
+    # print("--------------len",len(sample['student_seq']))
+    # print("----------------student_seq:", sample['student_seq'])
+    # print("---------------target_d:", sample['target_d'])
+    # print("----------------target_a:", sample['target_a'])
+    # print("----------------person_id:", sample['person_id'])
+    # print("----------------exp_id:", sample['exp_id'])
+    # print("----------------ts:", sample['ts'])
+
 
