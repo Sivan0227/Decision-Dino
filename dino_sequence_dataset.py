@@ -16,17 +16,19 @@ class DinoSequenceDataset(Dataset):
         return len(self.data)
 
     def pad_left(self, seq, target_len):
-        pad_token = {"type": "PAD", "value": None}
         pad_len = target_len - len(seq)
-        if pad_len > 0:
-            print(f"[Padding] Added {pad_len} PAD tokens")
-        padded = [pad_token] * pad_len + seq
+        # if pad_len > 0:
+        #     print(f"[Padding] Added {pad_len} PAD tokens")
+        pad_token = [{'type': 'A', 'value': 0.0},
+                     {'type': 'S', 'value': {'dis': [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 'v': [0, 0, 0]}},
+                     {'type': 'D', 'value': 0}]
+        padded = pad_token * int(pad_len/3) + seq
         mask = [0] * pad_len + [1] * len(seq)
         return padded[-target_len:], mask[-target_len:]
 
     def __getitem__(self, idx):
         item = self.data[idx]
-        print(f"[Processing] Sample {idx}")
+        # print(f"[Processing] Sample {idx}")
         token_seq = item['seq']
         person_id = item['person_id']
         exp_id = item['exp_id']

@@ -37,8 +37,7 @@ class ASDTransformer(nn.Module):
             d_model=embed_dim, 
             nhead=num_heads, 
             dim_feedforward=int(embed_dim * mlp_ratio),
-            dropout=dropout, 
-            batch_first=True
+            dropout=dropout
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=depth)
 
@@ -53,7 +52,7 @@ class ASDTransformer(nn.Module):
             nn.Linear(embed_dim, 1)  # 回归
         )
 
-    def forward(self, input_tokens):
+    def forward(self, input_tokens,mask=None):
         """
         input_tokens: [B, T] of list of dicts with keys: type, value
         """
@@ -65,14 +64,14 @@ class ASDTransformer(nn.Module):
         for batch in input_tokens:
             embed_seq = []
             for token in batch:
-                if token['type'] == 'A':
+                if token['type'][0] == 'A':
                     val = torch.tensor(token['value'], dtype=torch.float32, device=device).view(1, 1)
                     embed = self.action_embed(val)
-                elif token['type'] == 'S':
+                elif token['type'][0] == 'S':
                     dis = torch.tensor(token['value']['dis'], dtype=torch.float32, device=device).view(1, -1)
                     v = torch.tensor(token['value']['v'], dtype=torch.float32, device=device).view(1, -1)
                     embed = self.dis_embed(dis) + self.v_embed(v)
-                elif token['type'] == 'D':
+                elif token['type'][0] == 'D':
                     val = torch.tensor(token['value'], dtype=torch.long, device=device).view(1)
                     embed = self.decision_embed(val)
                 else:  # PAD or unknown
@@ -83,23 +82,39 @@ class ASDTransformer(nn.Module):
 
         x = torch.stack(embeds, dim=0)  # [B, T, D]
 
+        # === Positional embedding ===
+        x = x + self.pos_embed[:, :x.size(1), :]
+
         # === CLS token prepend ===
         cls_tokens = self.cls_token.expand(B, -1, -1)  # [B, 1, D]
         x = torch.cat((cls_tokens, x), dim=1)  # [B, T+1, D]
 
-        # === Positional embedding ===
-        x = x + self.pos_embed[:, :x.size(1), :]
+        if mask is not None:
+            # mask: batch x seq_len → 加一列 False 给 cls
+            cls_mask = torch.zeros(mask.size(0), 1, dtype=torch.bool, device=mask.device)
+            full_mask = torch.cat((cls_mask, mask == 0), dim=1)  # True 表示 padding
+        else:
+            full_mask = None
 
-        # === Transformer ===
-        x = self.transformer(x)  # [B, T+1, D]
+        # x shape: (B, S, D)
+        x = x.transpose(0, 1)  # → (S, B, D)
+
+        x = self.transformer(x, src_key_padding_mask=full_mask)
+
+        x = x.transpose(0, 1)  # → 回到 (B, S, D)
+
 
         # === Output ===
         cls_output = x[:, 0, :]  # [B, D]
 
-        decision_logits = self.decision_head(cls_output)
-        action_pred = self.action_head(cls_output)
 
-        return {
-            "decision_logits": decision_logits,
-            "action_pred": action_pred
-        }
+        if self.mode == "pretrain":
+            return cls_output
+
+        else:  # "finetune"
+            decision_logits = self.decision_head(cls_output)
+            action_pred = self.action_head(cls_output)
+            return {
+                "decision_logits": decision_logits,
+                "action_pred": action_pred
+            }

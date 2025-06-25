@@ -1,0 +1,245 @@
+import os
+import time
+import argparse
+import datetime
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.backends.cudnn as cudnn
+from torch.utils.data import DataLoader
+from pathlib import Path
+from torch.utils.tensorboard import SummaryWriter
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+
+from sequence_transformer import ASDTransformer
+from dino_sequence_dataset import DinoSequenceDataset
+
+# 兼容 AMP 支持 (PyTorch >=1.8)
+try:
+    from torch.cuda.amp import autocast, GradScaler
+except ImportError:
+    autocast = None
+    GradScaler = None
+
+# cudnn 加速（仅在 CUDA 可用时）
+if torch.cuda.is_available():
+    cudnn.benchmark = True
+
+
+# ============ DINOLoss 内联定义 ============
+class DINOLoss(nn.Module):
+    def __init__(self, out_dim, ncrops, warmup_teacher_temp, teacher_temp,
+                 warmup_teacher_temp_epochs, nepochs, center_momentum=0.9,
+                 use_cls_token_only=False):
+        super().__init__()
+        self.student_temp = 0.1
+        self.center_momentum = center_momentum
+        self.use_cls_token_only = use_cls_token_only
+        self.register_buffer("center", torch.zeros(1, out_dim))
+        self.teacher_temp_schedule = torch.cat([
+            torch.linspace(warmup_teacher_temp, teacher_temp, warmup_teacher_temp_epochs),
+            torch.ones(nepochs - warmup_teacher_temp_epochs) * teacher_temp
+        ])
+        self.ncrops = ncrops
+
+    def forward(self, student_output, teacher_output, epoch):
+        student_out = student_output / self.student_temp
+        student_out = student_out.chunk(self.ncrops)
+        temp = self.teacher_temp_schedule[epoch].to(teacher_output.device)
+        teacher_out = F.softmax((teacher_output - self.center) / temp, dim=-1)
+        teacher_out = teacher_out.detach().chunk(2)
+
+        total_loss, n_loss_terms = 0, 0
+        for iq, q in enumerate(teacher_out):
+            for v in range(len(student_out)):
+                if v == iq:
+                    continue
+                loss = torch.sum(-q * F.log_softmax(student_out[v], dim=-1), dim=-1)
+                total_loss += loss.mean()
+                n_loss_terms += 1
+        total_loss /= n_loss_terms
+        self.update_center(teacher_output)
+        return total_loss
+
+    @torch.no_grad()
+    def update_center(self, teacher_output):
+        batch_center = torch.mean(teacher_output, dim=0, keepdim=True)
+        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
+
+
+def cancel_gradients_last_layer(epoch, model, freeze_epoch):
+    if epoch >= freeze_epoch:
+        return
+    for name, param in model.named_parameters():
+        if "last_layer" in name:
+            param.grad = None
+
+def clip_gradients(model, clip):
+    norms = []
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            norm = param.grad.data.norm(2)
+            if torch.isnan(norm):
+                continue
+            norms.append(norm.item())
+            torch.nn.utils.clip_grad_norm_(param, clip)
+    return norms
+
+def my_collate_fn(batch):
+    return {
+        'student_seq': [item['student_seq'] for item in batch],
+        'student_mask': [item['student_mask'] for item in batch],
+        'teacher_seq': [item['teacher_seq'] for item in batch],
+        'teacher_mask': [item['teacher_mask'] for item in batch],
+    }
+
+
+# ============ 主训练函数 ============
+def train_dino(args):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # ---- 数据加载 ----
+    dataset = DinoSequenceDataset(args.data_path)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=0,collate_fn=my_collate_fn)
+
+    # ---- 模型 ----
+    student = ASDTransformer(mode="pretrain").to(device)
+    teacher = ASDTransformer(mode="pretrain").to(device)
+    teacher.load_state_dict(student.state_dict())
+    for p in teacher.parameters():
+        p.requires_grad = False
+
+    # ---- DINOLoss ----
+    dino_loss = DINOLoss(
+        args.out_dim,
+        ncrops=2,
+        warmup_teacher_temp=args.warmup_teacher_temp,
+        teacher_temp=args.teacher_temp,
+        warmup_teacher_temp_epochs=args.warmup_teacher_temp_epochs,
+        nepochs=args.epochs,
+    ).to(device)
+
+    # ---- 优化器 ----
+    params_groups = [
+        {"params": [p for n, p in student.named_parameters() if p.requires_grad and ("bias" not in n) and ("norm" not in n)], "weight_decay": 0.05},
+        {"params": [p for n, p in student.named_parameters() if p.requires_grad and ("bias" in n or "norm" in n)], "weight_decay": 0.0},
+    ]
+    optimizer = torch.optim.AdamW(params_groups, lr=args.lr)
+    scaler = GradScaler() if args.use_fp16 and GradScaler is not None else None
+
+    log_dir = Path(args.output_dir) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(log_dir=str(log_dir))
+
+    momentum_schedule = [args.momentum_teacher] * args.epochs * len(dataloader)
+
+    loss_curve = []
+    start_time = time.time()
+    for epoch in range(args.epochs):
+        student.train()
+        total_loss = 0.0
+
+        pbar = tqdm(dataloader, desc=f"Epoch [{epoch+1}/{args.epochs}]", leave=False)
+        for it, batch in enumerate(pbar):
+            student_seq = batch['student_seq']
+            teacher_seq = batch['teacher_seq']
+
+            student_mask = torch.tensor(batch['student_mask'], dtype=torch.bool).to(device)
+            teacher_mask = torch.tensor(batch['teacher_mask'], dtype=torch.bool).to(device)
+
+            student_seq = [
+                            [
+                                {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in token.items()}
+                                for token in sample
+                            ]
+                            for sample in student_seq ]
+
+            teacher_seq = [
+                            [
+                                {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in token.items()}
+                                for token in sample
+                            ]
+                            for sample in teacher_seq  ]
+            if scaler:
+                with autocast():
+                    s_out = student(student_seq, mask=student_mask)
+                    t_out = teacher(teacher_seq, mask=teacher_mask)
+                    loss = dino_loss(s_out, t_out, epoch)
+                scaler.scale(loss).backward()
+                if args.clip_grad:
+                    scaler.unscale_(optimizer)
+                    clip_gradients(student, args.clip_grad)
+                cancel_gradients_last_layer(epoch, student, args.freeze_last_layer)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+            else:
+                s_out = student(student_seq, mask=student_mask)
+                t_out = teacher(teacher_seq, mask=teacher_mask)
+                # print("s_out:", s_out.shape, "t_out:", t_out.shape)
+                loss = dino_loss(s_out, t_out, epoch)
+                loss.backward()
+                if args.clip_grad:
+                    clip_gradients(student, args.clip_grad)
+                cancel_gradients_last_layer(epoch, student, args.freeze_last_layer)
+                optimizer.step()
+                optimizer.zero_grad()
+
+            # === EMA update teacher ===
+            with torch.no_grad():
+                m = momentum_schedule[it]
+                for param_q, param_k in zip(student.parameters(), teacher.parameters()):
+                    param_k.data.mul_(m).add_((1. - m) * param_q.data)
+
+            total_loss += loss.item()
+            pbar.set_postfix(loss=loss.item())
+
+        avg_loss = total_loss / len(dataloader)
+        writer.add_scalar("Loss/train", avg_loss, epoch)
+        print(f"Epoch [{epoch+1}/{args.epochs}], Loss: {avg_loss:.4f}")
+        loss_curve.append(avg_loss)
+
+        if (epoch + 1) % args.save_interval == 0:
+            ckpt_path = Path(args.output_dir) / f"student_epoch{epoch+1}.pth"
+            torch.save(student.state_dict(), ckpt_path)
+            ckpt_path = Path(args.output_dir) / f"teacher_epoch{epoch+1}.pth"
+            torch.save(teacher.state_dict(), ckpt_path)
+
+    # 画出 loss 曲线
+    plt.figure()
+    plt.plot(loss_curve, label='Train Loss')
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Pretraining Loss Curve")
+    plt.legend()
+    plt.grid(True)
+    save_path = Path(args.data_path).parent / "pretrain_loss_curve.png"
+    plt.savefig(str(save_path))
+    plt.close()
+    total_time = str(datetime.timedelta(seconds=int(time.time() - start_time)))
+    print("\nTraining complete in:", total_time)
+    writer.close()
+
+
+# ============ 主函数入口 ============
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_path", type=str, default="../dino_data/dino_sequence_data/pretrain.pt")
+    parser.add_argument("--output_dir", type=str, default="../dino_data/output_dino")
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--out_dim", type=int, default=256)
+    parser.add_argument("--save_interval", type=int, default=10)
+    parser.add_argument("--use_fp16", action="store_true")
+    parser.add_argument("--clip_grad", type=float, default=3.0)
+    parser.add_argument("--freeze_last_layer", type=int, default=1)
+    parser.add_argument("--momentum_teacher", type=float, default=0.996)
+    parser.add_argument('--warmup_teacher_temp', default=0.04, type=float, help="Initial value for the teacher temperature.")
+    parser.add_argument('--teacher_temp', default=0.07, type=float, help="Final value (after linear warmup) of the teacher temperature.")
+    parser.add_argument('--warmup_teacher_temp_epochs', default=30, type=int, help="Number of warmup epochs for the teacher temperature.")
+    args = parser.parse_args()
+
+    train_dino(args)
+    

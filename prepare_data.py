@@ -67,6 +67,6 @@ torch.save(val_set, OUTPUT_DIR / "val.pt")
 
 print("✅ 数据处理完成")
 print(f"预训练集样本数: {len(pretrain_set)}")
-print(f"samples in pretrain_set: {pretrain_set[:2]}")  # 打印前两个样本以验证
+# print(f"samples in pretrain_set: {pretrain_set[:2]}")  # 打印前两个样本以验证
 print(f"微调集样本数: {len(finetune_set)}")
 print(f"验证集样本数: {len(val_set)}")
