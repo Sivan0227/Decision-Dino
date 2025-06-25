@@ -57,15 +57,17 @@ class DinoSequenceDataset(Dataset):
             "ts_seq": ts_seq
         }
 
-# 用法示例：
-dataset = DinoSequenceDataset("../dino_data/dino_sequence_data/pretrain.pt")
-sample = dataset[0]
-print("len",len(sample['teacher_seq']),len(sample['student_seq']))
-print("teacher_seq:", sample['teacher_seq'])
-print("student_seq:", sample['student_seq'])
-print("target_d:", sample['target_d'])
-print("target_a:", sample['target_a'])
-print("person_id:", sample['person_id'])
-print("exp_id:", sample['exp_id'])
-print("ts_seq:", sample['ts_seq'])
+
+if __name__ == "__main__":
+    # 用法示例：
+    dataset = DinoSequenceDataset("../dino_data/dino_sequence_data/pretrain.pt")
+    sample = dataset[0]
+    print("len",len(sample['teacher_seq']),len(sample['student_seq']))
+    print("teacher_seq:", sample['teacher_seq'])
+    print("student_seq:", sample['student_seq'])
+    print("target_d:", sample['target_d'])
+    print("target_a:", sample['target_a'])
+    print("person_id:", sample['person_id'])
+    print("exp_id:", sample['exp_id'])
+    print("ts_seq:", sample['ts_seq'])
 
