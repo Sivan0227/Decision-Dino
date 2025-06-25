@@ -23,7 +23,7 @@ class DinoSequenceDataset(Dataset):
                      {'type': 'S', 'value': {'dis': [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 'v': [0, 0, 0]}},
                      {'type': 'D', 'value': 0}]
         padded = pad_token * int(pad_len/3) + seq
-        mask = [0] * pad_len + [1] * len(seq)
+        mask = [1] * pad_len + [0] * len(seq)
         return padded[-target_len:], mask[-target_len:]
 
     def __getitem__(self, idx):
