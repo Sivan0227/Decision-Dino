@@ -98,14 +98,22 @@ def my_collate_fn(batch):
 
 # ============ 主训练函数 ============
 def train_dino(args):
+    # 生成时间戳
+    time_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # 初始化记录文件
-    csv_path = Path(args.output_dir) / "train_metrics.csv"
+    # 创建子目录
+    weights_dir = Path(args.output_dir) / "weights"
+    figures_dir = Path(args.output_dir) / "figures"
+    weights_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    # 初始化 CSV 路径
+    csv_path = Path(args.output_dir) / f"train_metrics_{time_tag}.csv"
     with open(csv_path, mode='w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(["epoch", "loss", "student_variance", "teacher_variance"])
 
-    # 初始化列表用于绘图
+    # 初始化曲线数据列表
     loss_curve = []
     student_variance_epoch_curve = []
     teacher_variance_epoch_curve = []
@@ -147,7 +155,6 @@ def train_dino(args):
 
     momentum_schedule = [args.momentum_teacher] * args.epochs * len(dataloader)
 
-    loss_curve = []
     start_time = time.time()
     for epoch in range(args.epochs):
         student.train()
@@ -225,9 +232,9 @@ def train_dino(args):
         loss_curve.append(avg_loss)
 
         if (epoch + 1) % args.save_interval == 0:
-            ckpt_path = Path(args.output_dir) / f"student_epoch{epoch+1}.pth"
+            ckpt_path = weights_dir / f"student_epoch{epoch+1}_{time_tag}.pth"
             torch.save(student.state_dict(), ckpt_path)
-            ckpt_path = Path(args.output_dir) / f"teacher_epoch{epoch+1}.pth"
+            ckpt_path = weights_dir / f"teacher_epoch{epoch+1}_{time_tag}.pth"
             torch.save(teacher.state_dict(), ckpt_path)
 
         # === 记录 loss 和 variance ===
@@ -250,7 +257,7 @@ def train_dino(args):
         plt.title("Loss Curve up to Epoch {}".format(epoch + 1))
         plt.grid(True)
         plt.legend()
-        plt.savefig(Path(args.output_dir) / f"loss_curve_epoch{epoch+1}.png")
+        plt.savefig(figures_dir) / f"loss_curve_epoch{epoch+1}_{time_tag}.png")
         plt.close()
 
         # 2. Variance 曲线
@@ -262,7 +269,7 @@ def train_dino(args):
         plt.title("Variance Curve up to Epoch {}".format(epoch + 1))
         plt.grid(True)
         plt.legend()
-        plt.savefig(Path(args.output_dir) / f"variance_curve_epoch{epoch+1}.png")
+        plt.savefig(figures_dir / f"variance_curve_epoch{epoch+1}_{time_tag}.png")
         plt.close()
 
     total_time = str(datetime.timedelta(seconds=int(time.time() - start_time)))
