@@ -257,7 +257,7 @@ def train_dino(args):
         plt.title("Loss Curve up to Epoch {}".format(epoch + 1))
         plt.grid(True)
         plt.legend()
-        plt.savefig(figures_dir) / f"loss_curve_epoch{epoch+1}_{time_tag}.png")
+        plt.savefig(figures_dir / f"loss_curve_epoch{epoch+1}_{time_tag}.png")
         plt.close()
 
         # 2. Variance 曲线
