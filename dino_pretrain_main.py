@@ -1,4 +1,5 @@
 import os
+import csv
 import time
 import argparse
 import datetime
@@ -97,6 +98,18 @@ def my_collate_fn(batch):
 
 # ============ 主训练函数 ============
 def train_dino(args):
+
+    # 初始化记录文件
+    csv_path = Path(args.output_dir) / "train_metrics.csv"
+    with open(csv_path, mode='w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(["epoch", "loss", "student_variance", "teacher_variance"])
+
+    # 初始化列表用于绘图
+    loss_curve = []
+    student_variance_epoch_curve = []
+    teacher_variance_epoch_curve = []
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # ---- 数据加载 ----
@@ -140,6 +153,9 @@ def train_dino(args):
         student.train()
         total_loss = 0.0
 
+        student_variances = []
+        teacher_variances = []
+
         pbar = tqdm(dataloader, desc=f"Epoch [{epoch+1}/{args.epochs}]", leave=False)
         for it, batch in enumerate(pbar):
             student_seq = batch['student_seq']
@@ -166,6 +182,10 @@ def train_dino(args):
                     s_out = student(student_seq, mask=student_mask)
                     t_out = teacher(teacher_seq, mask=teacher_mask)
                     loss = dino_loss(s_out, t_out, epoch)
+                    student_var = s_out.var(dim=1).mean().item()  # [B, D] → scalar
+                    teacher_var = t_out.var(dim=1).mean().item()
+                    student_variances.append(student_var)
+                    teacher_variances.append(teacher_var)
                 scaler.scale(loss).backward()
                 if args.clip_grad:
                     scaler.unscale_(optimizer)
@@ -179,6 +199,10 @@ def train_dino(args):
                 t_out = teacher(teacher_seq, mask=teacher_mask)
                 # print("s_out:", s_out.shape, "t_out:", t_out.shape)
                 loss = dino_loss(s_out, t_out, epoch)
+                student_var = s_out.var(dim=1).mean().item()  # [B, D] → scalar
+                teacher_var = t_out.var(dim=1).mean().item()
+                student_variances.append(student_var)
+                teacher_variances.append(teacher_var)
                 loss.backward()
                 if args.clip_grad:
                     clip_gradients(student, args.clip_grad)
@@ -206,17 +230,41 @@ def train_dino(args):
             ckpt_path = Path(args.output_dir) / f"teacher_epoch{epoch+1}.pth"
             torch.save(teacher.state_dict(), ckpt_path)
 
-    # 画出 loss 曲线
-    plt.figure()
-    plt.plot(loss_curve, label='Train Loss')
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title("Pretraining Loss Curve")
-    plt.legend()
-    plt.grid(True)
-    save_path = Path(args.output_dir).parent / "pretrain_loss_curve.png"
-    plt.savefig(str(save_path))
-    plt.close()
+        # === 记录 loss 和 variance ===
+        avg_student_var = sum(student_variances) / len(student_variances)
+        avg_teacher_var = sum(teacher_variances) / len(teacher_variances)
+        student_variance_epoch_curve.append(avg_student_var)
+        teacher_variance_epoch_curve.append(avg_teacher_var)
+
+        # === 写入 CSV ===
+        with open(csv_path, mode='a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([epoch + 1, avg_loss, avg_student_var, avg_teacher_var])
+
+        # === 每轮都画图保存 ===
+        # 1. Loss 曲线
+        plt.figure()
+        plt.plot(loss_curve, label='Train Loss', color='tab:blue')
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.title("Loss Curve up to Epoch {}".format(epoch + 1))
+        plt.grid(True)
+        plt.legend()
+        plt.savefig(Path(args.output_dir) / f"loss_curve_epoch{epoch+1}.png")
+        plt.close()
+
+        # 2. Variance 曲线
+        plt.figure()
+        plt.plot(student_variance_epoch_curve, label='Student Variance', color='tab:orange')
+        plt.plot(teacher_variance_epoch_curve, label='Teacher Variance', color='tab:green')
+        plt.xlabel("Epoch")
+        plt.ylabel("Variance")
+        plt.title("Variance Curve up to Epoch {}".format(epoch + 1))
+        plt.grid(True)
+        plt.legend()
+        plt.savefig(Path(args.output_dir) / f"variance_curve_epoch{epoch+1}.png")
+        plt.close()
+
     total_time = str(datetime.timedelta(seconds=int(time.time() - start_time)))
     print("\nTraining complete in:", total_time)
     writer.close()
