@@ -97,15 +97,15 @@ class ASDTransformer(nn.Module):
             full_mask = None
 
         # x shape: (B, S, D)
-        x = x.transpose(0, 1)  # → (S, B, D)
+        x = x.transpose(0, 1)  # → (T+1, B, D)
 
         x = self.transformer(x, src_key_padding_mask=full_mask)
 
-        x = x.transpose(0, 1)  # → 回到 (B, S, D)
+        x = x.transpose(0, 1)  # → 回到 (B, T+1, D)
 
 
         # === Output ===
-        cls_output = x[:, 0, :]  # [B, D]
+        cls_output = x[:, 0, :]  # [B, T+1]
 
 
         if self.mode == "pretrain":
