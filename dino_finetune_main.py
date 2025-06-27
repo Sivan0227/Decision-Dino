@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader,random_split
 from torch.cuda.amp import GradScaler, autocast
 from pathlib import Path
 import time
@@ -10,6 +10,8 @@ import matplotlib.pyplot as plt
 import csv
 import argparse
 from tqdm import tqdm
+from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
+import seaborn as sns
 
 from sequence_transformer import ASDTransformer
 from dino_sequence_dataset import DinoSequenceDataset
@@ -27,8 +29,13 @@ def my_collate_fn(batch):
 def train_finetune(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    dataset = DinoSequenceDataset(args.data_path)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, collate_fn=my_collate_fn)
+    full_dataset = DinoSequenceDataset(args.data_path)
+    val_size = int(0.2 * len(full_dataset))
+    train_size = len(full_dataset) - val_size
+    train_set, val_set = random_split(full_dataset, [train_size, val_size])
+
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=0, collate_fn=my_collate_fn)
+    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0, collate_fn=my_collate_fn)
 
     student = ASDTransformer(mode="finetune").to(device)
     if args.pretrained_weights:
@@ -70,93 +77,122 @@ def train_finetune(args):
 
     with open(csv_path, mode='w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(["epoch", "loss", "decision_loss", "action_loss"])
+        writer.writerow(["epoch", "loss", "decision_loss", "action_loss", "accuracy", "mae", "precision", "recall", "f1"])
 
-    loss_curve = []
-    decision_loss_curve = []
-    action_loss_curve = []
+    history = {"train": {"loss":[], "d_loss":[], "a_loss":[]}, "val": {"loss":[], "d_loss":[], "a_loss":[], "acc":[], "mae":[]}}
+
 
     ce_loss_fn = nn.CrossEntropyLoss()
     mse_loss_fn = nn.MSELoss()
 
     start_time = time.time()
     for epoch in range(args.epochs):
-        student.train()
-        total_loss = 0.0
-        total_decision_loss = 0.0
-        total_action_loss = 0.0
+        for phase, loader in [("train", train_loader), ("val", val_loader)]:
+            student.train() if phase == "train" else student.eval()
 
-        pbar = tqdm(dataloader, desc=f"Finetune Epoch {epoch+1}/{args.epochs}")
-        for batch in pbar:
-            student_seq = batch['student_seq']
-            student_mask = torch.stack(batch['student_mask']).to(device).bool()
+            total_loss = total_d_loss = total_a_loss = 0.0
+            total_correct = total_samples = total_mae = 0.0
+            all_targets, all_preds = [], []
 
-            student_seq = [
-                [
-                    {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in token.items()}
-                    for token in sample
-                ]
-                for sample in student_seq
-            ]
+            pbar = tqdm(loader, desc=f"{phase.capitalize()} Epoch {epoch+1}/{args.epochs}")
+            for batch in pbar:
+                student_seq = batch['student_seq']
+                student_mask = torch.stack(batch['student_mask']).to(device).bool()
+                student_seq = [[{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in token.items()} for token in sample] for sample in student_seq]
+                target_d = torch.tensor(batch['target_d'], dtype=torch.long).to(device)
+                target_a = torch.tensor(batch['target_a'], dtype=torch.float32).to(device).view(-1,1)
 
-            target_d = torch.tensor(batch['target_d'], dtype=torch.long).to(device)
-            target_a = torch.tensor(batch['target_a'], dtype=torch.float32).to(device).view(-1, 1)
+                with torch.set_grad_enabled(phase == "train"):
+                    if scaler and phase == "train":
+                        with autocast():
+                            d_out, a_out = student(student_seq, mask=student_mask)
+                            d_loss = ce_loss_fn(d_out, target_d)
+                            a_loss = mse_loss_fn(a_out, target_a)
+                            loss = d_loss + a_loss
+                        scaler.scale(loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        d_out, a_out = student(student_seq, mask=student_mask)
+                        d_loss = ce_loss_fn(d_out, target_d)
+                        a_loss = mse_loss_fn(a_out, target_a)
+                        loss = d_loss + a_loss
+                        if phase == "train":
+                            loss.backward()
+                            optimizer.step()
+                    if phase == "train":
+                        optimizer.zero_grad()
 
-            optimizer.zero_grad()
-            if scaler:
-                with autocast():
-                    d_out, a_out = student(student_seq, mask=student_mask)
-                    d_loss = ce_loss_fn(d_out, target_d)
-                    a_loss = mse_loss_fn(a_out, target_a)
-                    loss = d_loss + a_loss
-                scaler.scale(loss).backward()
-                if args.clip_grad:
-                    scaler.unscale_(optimizer)
-                    clip_gradients(student, args.clip_grad)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                d_out, a_out = student(student_seq, mask=student_mask)
-                d_loss = ce_loss_fn(d_out, target_d)
-                a_loss = mse_loss_fn(a_out, target_a)
-                loss = d_loss + a_loss
-                loss.backward()
-                if args.clip_grad:
-                    clip_gradients(student, args.clip_grad)
-                optimizer.step()
+                total_loss += loss.item()
+                total_d_loss += d_loss.item()
+                total_a_loss += a_loss.item()
+                pred_class = torch.argmax(d_out, dim=1)
+                correct = (pred_class == target_d).sum().item()
+                total_correct += correct
+                total_samples += target_d.size(0)
+                mae = torch.mean(torch.abs(a_out.squeeze() - target_a.squeeze())).item()
+                total_mae += mae * target_d.size(0)
+                all_targets.extend(target_d.cpu().numpy())
+                all_preds.extend(pred_class.cpu().numpy())
+                pbar.set_postfix(loss=loss.item(), acc=correct/target_d.size(0), mae=mae)
 
-            total_loss += loss.item()
-            total_decision_loss += d_loss.item()
-            total_action_loss += a_loss.item()
-            pbar.set_postfix(loss=loss.item(), d_loss=d_loss.item(), a_loss=a_loss.item())
+            avg_loss = total_loss / len(loader)
+            avg_d_loss = total_d_loss / len(loader)
+            avg_a_loss = total_a_loss / len(loader)
+            history[phase]["loss"].append(avg_loss)
+            history[phase]["d_loss"].append(avg_d_loss)
+            history[phase]["a_loss"].append(avg_a_loss)
 
-        avg_loss = total_loss / len(dataloader)
-        avg_d_loss = total_decision_loss / len(dataloader)
-        avg_a_loss = total_action_loss / len(dataloader)
-        loss_curve.append(avg_loss)
-        decision_loss_curve.append(avg_d_loss)
-        action_loss_curve.append(avg_a_loss)
+            if phase == "val":
+                avg_acc = total_correct / total_samples
+                avg_mae = total_mae / total_samples
+                history[phase]["acc"].append(avg_acc)
+                history[phase]["mae"].append(avg_mae)
+                cm = confusion_matrix(all_targets, all_preds)
+                plt.figure(figsize=(6,5))
+                sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+                plt.title(f"Confusion Matrix")
+                plt.savefig(figures_dir / f"confusion_matrix_epoch{epoch+1}.png")
+                plt.close()
+                ckpt_path = weights_dir / f"student_finetune_epoch{epoch+1}.pth"
+                torch.save(student.state_dict(), ckpt_path)
 
-        with open(csv_path, mode='a', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow([epoch + 1, avg_loss, avg_d_loss, avg_a_loss])
+            precision, recall, f1, _ = precision_recall_fscore_support(all_targets, all_preds, average="macro")
+            with open(csv_path, mode='a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([epoch+1, phase, avg_loss, avg_d_loss, avg_a_loss, avg_acc if phase=="val" else "", avg_mae if phase=="val" else "", precision, recall, f1])
 
-        # 保存图像
+        # 主 loss 曲线
         plt.figure()
-        plt.plot(loss_curve, label="Total Loss")
-        plt.plot(decision_loss_curve, label="Decision Loss")
-        plt.plot(action_loss_curve, label="Action Loss")
-        plt.xlabel("Epoch")
-        plt.ylabel("Loss")
-        plt.title("Finetuning Loss Curve".format(epoch + 1))
+        plt.plot(history['train']['loss'], label='Train Loss')
+        plt.plot(history['val']['loss'], label='Val Loss')
+        plt.plot(history['train']['d_loss'], '--', label='Train D Loss')
+        plt.plot(history['val']['d_loss'], '--', label='Val D Loss')
+        plt.plot(history['train']['a_loss'], ':', label='Train A Loss')
+        plt.plot(history['val']['a_loss'], ':', label='Val A Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
         plt.legend()
         plt.grid(True)
-        plt.savefig(figures_dir / f"finetune_loss_curve_epoch{epoch+1}.png")
+        plt.title("Train-Val Loss Curve")
+        plt.savefig(figures_dir / f"loss_curve_epoch{epoch+1}.png")
         plt.close()
 
-        # 保存权重
-        ckpt_path = weights_dir / f"student_finetune_epoch{epoch+1}.pth"
-        torch.save(student.state_dict(), ckpt_path)
+        # 两两画图
+        def save_pair_plot(train_list, val_list, name):
+            plt.figure()
+            plt.plot(train_list, label=f'Train {name}')
+            plt.plot(val_list, label=f'Val {name}')
+            plt.xlabel('Epoch')
+            plt.ylabel(name)
+            plt.legend()
+            plt.grid(True)
+            plt.title(f'Train-Val {name} Curve')
+            plt.savefig(figures_dir / f"{name.lower()}_curve_epoch{epoch+1}.png")
+            plt.close()
+        save_pair_plot(history['train']['loss'], history['val']['loss'], 'Loss')
+        save_pair_plot(history['train']['d_loss'], history['val']['d_loss'], 'Decision Loss')
+        save_pair_plot(history['train']['a_loss'], history['val']['a_loss'], 'Action Loss')
 
     total_time = str(datetime.timedelta(seconds=int(time.time() - start_time)))
     print(f"\nFinetuning complete in: {total_time}")
