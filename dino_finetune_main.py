@@ -148,7 +148,7 @@ def train_finetune(args):
         plt.plot(action_loss_curve, label="Action Loss")
         plt.xlabel("Epoch")
         plt.ylabel("Loss")
-        plt.title("Finetuning Loss Curve up to Epoch {}".format(epoch + 1))
+        plt.title("Finetuning Loss Curve".format(epoch + 1))
         plt.legend()
         plt.grid(True)
         plt.savefig(figures_dir / f"finetune_loss_curve_epoch{epoch+1}.png")
