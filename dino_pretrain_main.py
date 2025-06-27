@@ -278,8 +278,8 @@ def train_dino(args):
 # ============ 主函数入口 ============
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_path", type=str, default="../dino_data/dino_sequence_data/pretrain.pt")
-    parser.add_argument("--output_dir", type=str, default="../dino_data/output_dino")
+    parser.add_argument("--data_path", type=str)
+    parser.add_argument("--output_dir", type=str)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -293,6 +293,7 @@ if __name__ == "__main__":
     parser.add_argument('--teacher_temp', default=0.07, type=float, help="Final value (after linear warmup) of the teacher temperature.")
     parser.add_argument('--warmup_teacher_temp_epochs', default=30, type=int, help="Number of warmup epochs for the teacher temperature.")
     args = parser.parse_args()
-
+    args.data_path = "../dino_data/dino_sequence_data/pretrain.pt"
+    args.output_dir = "../dino_data/output_dino"
     train_dino(args)
     

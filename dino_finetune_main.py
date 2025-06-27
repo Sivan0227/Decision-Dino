@@ -165,7 +165,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_path', type=str, required=True, help="Path to finetune .pt data file")
     parser.add_argument('--pretrained_weights', type=str, default=None, help="Path to pretrained weights")
-    parser.add_argument('--output_dir', type=str, default="./output_finetune", help="Directory to save outputs")
+    parser.add_argument('--output_dir', type=str, help="Directory to save outputs")
     parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -175,5 +175,6 @@ if __name__ == "__main__":
                         help="Training mode: linear (linear probing) or finetune (full fine-tuning)")
 
     args = parser.parse_args()
+    args.data_path = "../dino_data/dino_sequence_data/finetune.pt"
+    args.output_dir = "../dino_data/output_dino"
     train_finetune(args)
-    
