@@ -71,8 +71,9 @@ def main(args):
     test_loss, test_acc, test_mae, y_true, y_pred = test_model(model, test_loader, device, criterion_decision, criterion_action)
 
     time_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(args.output_dir)
-    figures_dir = output_dir / f"figures_{time_tag}"
+    output_dir = Path(args.output_dir)/ f"finetune_test_{time_tag}"
+    figures_dir = output_dir / f"figures"
+    output_dir.mkdir(parents=True, exist_ok=True)
     figures_dir.mkdir(parents=True, exist_ok=True)
 
     metrics_df = pd.DataFrame({
@@ -80,7 +81,7 @@ def main(args):
         'test_acc': [test_acc],
         'test_mae': [test_mae]
     })
-    metrics_df.to_csv(output_dir / f"test_metrics_{time_tag}.csv", index=False)
+    metrics_df.to_csv(output_dir / f"test_metrics.csv", index=False)
 
     plt.figure()
     plt.bar(['Loss', 'Acc', 'MAE'], [test_loss, test_acc, test_mae])
@@ -105,5 +106,7 @@ if __name__ == "__main__":
     parser.add_argument('--output_dir', type=str, required=True, help='Output directory for results')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     args = parser.parse_args()
-    
+    args.test_data_path = "../dino_data/dino_sequence_data/finetune_test.pt"
+    args.weight_path = f"../dino_data/dino_sequence_data/{"finetune_"}/student_finetune_epoch{20}.pth"
+    args.output_dir = "../dino_data/output_dino"
     main(args)

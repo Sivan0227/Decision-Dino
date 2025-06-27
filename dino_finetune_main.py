@@ -200,7 +200,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--train_data_path', type=str, required=True, help='Path to finetune train dataset')
     parser.add_argument('--val_data_path', type=str, required=True, help='Path to finetune validation dataset')
-    parser.add_argument('--test_data_path', type=str, required=True, help='Path to finetune test dataset')
     parser.add_argument('--pretrained_weights', type=str, default=None, help="Path to pretrained weights")
     parser.add_argument('--output_dir', type=str, help="Directory to save outputs")
     parser.add_argument('--epochs', type=int, default=20)
@@ -214,7 +213,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     args.train_data_path = "../dino_data/dino_sequence_data/finetune_train.pt"
     args.val_data_path = "../dino_data/dino_sequence_data/finetune_val.pt"
-    args.test_data_path = "../dino_data/dino_sequence_data/finetune_test.pt"
-    args.pretrained_weights = f"../dino_data/output_dino/weights/student_pretrain_epoch{50}.pth"
+    args.pretrained_weights = f"../dino_data/output_dino/{'pretrain_'}/weights/student_pretrain_epoch{50}.pth"
     args.output_dir = "../dino_data/output_dino"
     train_finetune(args)
