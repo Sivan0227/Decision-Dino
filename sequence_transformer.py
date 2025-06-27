@@ -96,7 +96,7 @@ class ASDTransformer(nn.Module):
         else:
             full_mask = None
 
-        # x shape: (B, S, D)
+        # x shape: (B, T+1, D)
         x = x.transpose(0, 1)  # → (T+1, B, D)
 
         x = self.transformer(x, src_key_padding_mask=full_mask)
