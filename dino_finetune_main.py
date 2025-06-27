@@ -29,13 +29,12 @@ def my_collate_fn(batch):
 def train_finetune(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    full_dataset = DinoSequenceDataset(args.data_path)
-    val_size = int(0.2 * len(full_dataset))
-    train_size = len(full_dataset) - val_size
-    train_set, val_set = random_split(full_dataset, [train_size, val_size])
+    # 数据加载
+    train_dataset = DinoSequenceDataset(args.train_data_path)
+    val_dataset = DinoSequenceDataset(args.val_data_path)
 
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=0, collate_fn=my_collate_fn)
-    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0, collate_fn=my_collate_fn)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, collate_fn=my_collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, collate_fn=my_collate_fn)
 
     student = ASDTransformer(mode="finetune").to(device)
     if args.pretrained_weights:
@@ -199,7 +198,9 @@ def train_finetune(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_path', type=str, required=True, help="Path to finetune .pt data file")
+    parser.add_argument('--train_data_path', type=str, required=True, help='Path to finetune train dataset')
+    parser.add_argument('--val_data_path', type=str, required=True, help='Path to finetune validation dataset')
+    parser.add_argument('--test_data_path', type=str, required=True, help='Path to finetune test dataset')
     parser.add_argument('--pretrained_weights', type=str, default=None, help="Path to pretrained weights")
     parser.add_argument('--output_dir', type=str, help="Directory to save outputs")
     parser.add_argument('--epochs', type=int, default=20)
@@ -211,6 +212,9 @@ if __name__ == "__main__":
                         help="Training mode: linear (linear probing) or finetune (full fine-tuning)")
 
     args = parser.parse_args()
-    args.data_path = "../dino_data/dino_sequence_data/finetune.pt"
+    args.train_data_path = "../dino_data/dino_sequence_data/finetune_train.pt"
+    args.val_data_path = "../dino_data/dino_sequence_data/finetune_val.pt"
+    args.test_data_path = "../dino_data/dino_sequence_data/finetune_test.pt"
+    args.pretrained_weights = f"../dino_data/output_dino/weights/student_pretrain_epoch{50}.pth"
     args.output_dir = "../dino_data/output_dino"
     train_finetune(args)
