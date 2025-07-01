@@ -43,11 +43,9 @@ class ASDTransformer(nn.Module):
         # === Finetune aggregator ===
         finetune_encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
-            nhead=6,
+            nhead=4,
             dropout=dropout,
             dim_feedforward=embed_dim * 2,  # 保持轻量
-            activation='gelu',
-            batch_first=True  # 确保输入 [B, T, D]
         )
         self.finetune_transformer = nn.TransformerEncoder(finetune_encoder_layer, num_layers=3)
         self.finetune_norm = nn.LayerNorm(embed_dim)
