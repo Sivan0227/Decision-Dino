@@ -54,51 +54,78 @@ for i, sample in tqdm(enumerate(data), desc="Processing samples", total=len(data
     else:
         sequences.append(sample_dict)
 
-# ==== 数据划分 ====
-# 预训练：大部分人（42人）和他们的所有实验
-# 微调： 预训练没有见过的人共18人，其中训练集、验证集共计14人，可以出现重复的人，但是同一人在验证集中不能出现训练集中出现过的场景，测试集全新的4个人和他们的所有实验
 
-# ==== 确定 pretrain 数据 ====
-all_person_ids = list(set(s['person_id'] for s in sequences if s['person_id'] not in VAL_IDS))
-random.seed(42)
-finetune_person_ids = random.sample(all_person_ids, 14)
+"""方法1"""
+# # ==== 数据划分 ====
+# # 预训练：大部分人（42人）和他们的所有实验
+# # 微调： 预训练没有见过的人共18人，其中训练集、验证集共计14人，可以出现重复的人，但是同一人在验证集中不能出现训练集中出现过的场景，测试集全新的4个人和他们的所有实验
 
-pretrain = [s for s in sequences if s['person_id'] not in finetune_person_ids and s['person_id'] not in VAL_IDS]
+# # ==== 确定 pretrain 数据 ====
+# all_person_ids = list(set(s['person_id'] for s in sequences if s['person_id'] not in VAL_IDS))
+# random.seed(42)
+# finetune_person_ids = random.sample(all_person_ids, 14)
 
-# ==== 微调 train/val 数据 ====
-finetune_candidates = [s for s in sequences if s['person_id'] in finetune_person_ids]
-# 合并 sequences_finetune_2 非 VAL_IDS 样本
-finetune_candidates += [s for s in sequences_finetune_2 if s['person_id'] not in VAL_IDS]
+# pretrain = [s for s in sequences if s['person_id'] not in finetune_person_ids and s['person_id'] not in VAL_IDS]
 
-finetune_train = []
-finetune_val = []
+# # ==== 微调 train/val 数据 ====
+# finetune_candidates = [s for s in sequences if s['person_id'] in finetune_person_ids]
+# # 合并 sequences_finetune_2 非 VAL_IDS 样本
+# finetune_candidates += [s for s in sequences_finetune_2 if s['person_id'] not in VAL_IDS]
 
-# 按人划分，每人按场景分 7:3
-for pid in set(s['person_id'] for s in finetune_candidates):
-    person_samples = [s for s in finetune_candidates if s['person_id'] == pid]
+# finetune_train = []
+# finetune_val = []
 
-    # 按 exp_id 分组
-    exp_groups = {}
-    for sample in person_samples:
-        exp_id = sample['exp_id']
-        exp_groups.setdefault(exp_id, []).append(sample)
+# # 按人划分，每人按场景分 7:3
+# for pid in set(s['person_id'] for s in finetune_candidates):
+#     person_samples = [s for s in finetune_candidates if s['person_id'] == pid]
 
-    exp_ids = list(exp_groups.keys())
-    random.shuffle(exp_ids)
+#     # 按 exp_id 分组
+#     exp_groups = {}
+#     for sample in person_samples:
+#         exp_id = sample['exp_id']
+#         exp_groups.setdefault(exp_id, []).append(sample)
 
-    split_idx = int(len(exp_ids) * 0.7)
-    train_exp_ids = exp_ids[:split_idx]
-    val_exp_ids = exp_ids[split_idx:]
+#     exp_ids = list(exp_groups.keys())
+#     random.shuffle(exp_ids)
 
-    for eid in train_exp_ids:
-        finetune_train.extend(exp_groups[eid])
-    for eid in val_exp_ids:
-        finetune_val.extend(exp_groups[eid])
+#     split_idx = int(len(exp_ids) * 0.7)
+#     train_exp_ids = exp_ids[:split_idx]
+#     val_exp_ids = exp_ids[split_idx:]
 
-# ==== 微调测试集 ====
+#     for eid in train_exp_ids:
+#         finetune_train.extend(exp_groups[eid])
+#     for eid in val_exp_ids:
+#         finetune_val.extend(exp_groups[eid])
+
+# # ==== 微调测试集 ====
+# finetune_test = [s for s in sequences + sequences_finetune_2 if s['person_id'] in VAL_IDS]
+
+"""方法2"""
+# ==== 数据划分：方法2 以场景为单位打乱，其中验证集全新的人和他们的所有场景====
+# 测试集：严格规定的4个人的所有数据（含短数据）
 finetune_test = [s for s in sequences + sequences_finetune_2 if s['person_id'] in VAL_IDS]
 
+# 剩余数据：用于预训练和微调训练
+remaining = [s for s in sequences if s['person_id'] not in VAL_IDS]
 
+# 用 (person_id, exp_id) 作为唯一 ID
+unique_ids = list(set((s['person_id'], s['exp_id']) for s in remaining))
+random.shuffle(unique_ids)
+split_idx = int(len(unique_ids) * 0.7)
+pretrain_ids = set(unique_ids[:split_idx])
+finetune_train_ids = set(unique_ids[split_idx:])
+
+pretrain = [s for s in remaining if (s['person_id'], s['exp_id']) in pretrain_ids]
+finetune_train = [s for s in remaining if (s['person_id'], s['exp_id']) in finetune_train_ids]
+
+# 把短数据（非测试集的）都作为微调训练集
+finetune_train += [s for s in sequences_finetune_2 if s['person_id'] not in VAL_IDS]
+
+# 从微调训练集中分出 15% 作为验证集
+random.shuffle(finetune_train)
+split_idx_val = int(len(finetune_train) * 0.75)
+finetune_val = finetune_train[split_idx_val:]
+finetune_train = finetune_train[:split_idx_val]
 
 # ==== 保存数据 ====
 torch.save(pretrain, OUTPUT_DIR / "pretrain.pt")
