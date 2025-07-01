@@ -12,19 +12,11 @@ import argparse
 from tqdm import tqdm
 from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
 import seaborn as sns
+from mtadam import MTAdam  # 假设 MTAdam 已经实现并导入
 
 from sequence_transformer import ASDTransformer
 from dino_sequence_dataset import DinoSequenceDataset
 from utils import clip_gradients
-
-def my_collate_fn(batch):
-    # 可以按你已有逻辑写，我先写个简单示例
-    return {
-        "student_seq": [item["student_seq"] for item in batch],
-        "student_mask": [item["student_mask"] for item in batch],
-        "target_d": [item["target_d"] for item in batch],
-        "target_a": [item["target_a"] for item in batch],
-    }
 
 def my_collate_fn(batch):
     return {
@@ -74,8 +66,13 @@ def train_finetune(args):
         {"params": [p for n, p in student.named_parameters() if p.requires_grad and ("bias" not in n) and ("norm" not in n)], "weight_decay": 0.05},
         {"params": [p for n, p in student.named_parameters() if p.requires_grad and ("bias" in n or "norm" in n)], "weight_decay": 0.0},
     ]
-    optimizer = optim.AdamW(params_groups, lr=args.lr)
-    scaler = GradScaler() if args.use_fp16 else None
+    # optimizer = optim.AdamW(params_groups, lr=args.lr)
+    optimizer = MTAdam(
+        student.parameters(),
+        lr=args.lr,
+        betas=(args.beta1, args.beta2),
+        eps=args.eps
+        )
 
     # === 路径和日志 ===
     time_tag = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -89,9 +86,9 @@ def train_finetune(args):
 
     with open(csv_path, mode='w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(["epoch", "loss", "decision_loss", "action_loss", "accuracy", "mae", "precision", "recall", "f1"])
+        writer.writerow(["epoch",'phase',"decision_loss", "action_loss", "accuracy", "mae", "precision", "recall", "f1"])
 
-    history = {"train": {"loss":[], "d_loss":[], "a_loss":[]}, "val": {"loss":[], "d_loss":[], "a_loss":[], "acc":[], "mae":[]}}
+    history = {"train": { "d_loss":[], "a_loss":[]}, "val": { "d_loss":[], "a_loss":[], "acc":[], "mae":[]}}
 
 
     ce_loss_fn = nn.CrossEntropyLoss()
@@ -102,7 +99,7 @@ def train_finetune(args):
         for phase, loader in [("train", train_loader), ("val", val_loader)]:
             student.train() if phase == "train" else student.eval()
 
-            total_loss = total_d_loss = total_a_loss = 0.0
+            total_d_loss = total_a_loss = 0.0
             total_correct = total_samples = total_mae = 0.0
             all_targets, all_preds = [], []
 
@@ -121,29 +118,17 @@ def train_finetune(args):
                 target_a = batch['target_a'].to(device).float()
 
                 with torch.set_grad_enabled(phase == "train"):
-                    if scaler and phase == "train":
-                        with autocast():
-                            d_out, a_out = student(s_a, s_s, s_d, s_a_idx, s_s_idx, s_d_idx, student_mask)
-                            d_loss = ce_loss_fn(d_out, target_d)
-                            a_loss = mse_loss_fn(a_out, target_a)
-                            loss = d_loss + a_loss
-                        scaler.scale(loss).backward()
-                        scaler.step(optimizer)
-                        scaler.update()
-                    else:
-                        d_out, a_out = student(s_a, s_s, s_d, s_a_idx, s_s_idx, s_d_idx, student_mask)
-                        d_loss = ce_loss_fn(d_out, target_d)
-                        a_loss = mse_loss_fn(a_out, target_a)
-                        loss = d_loss + a_loss
-                        if phase == "train":
-                            loss.backward()
-                            optimizer.step()
-                    if phase == "train":
-                        optimizer.zero_grad()
+                    d_out, a_out = student(s_a, s_s, s_d, s_a_idx, s_s_idx, s_d_idx, student_mask)
+                    # === 主任务 loss ===
+                    loss_decision = ce_loss_fn(d_out, target_d)
+                    loss_action = mse_loss_fn(a_out, target_a)
 
-                total_loss += loss.item()
-                total_d_loss += d_loss.item()
-                total_a_loss += a_loss.item()
+                    if phase == "train":
+                        loss_terms = [loss_decision, loss_action]
+                        optimizer.step(loss_terms)  # MTAdam 会自动调用 backward + update
+
+                total_d_loss += loss_decision.item()
+                total_a_loss += loss_action.item()
                 pred_class = torch.argmax(d_out, dim=1)
                 correct = (pred_class == target_d).sum().item()
                 total_correct += correct
@@ -152,12 +137,10 @@ def train_finetune(args):
                 total_mae += mae * target_d.size(0)
                 all_targets.extend(target_d.cpu().numpy())
                 all_preds.extend(pred_class.cpu().numpy())
-                pbar.set_postfix(loss=loss.item(), acc=correct/target_d.size(0), mae=mae)
+                pbar.set_postfix(d_loss=loss_decision.item(), a_loss=loss_action.item(), acc=correct/target_d.size(0), mae=mae)
 
-            avg_loss = total_loss / len(loader)
             avg_d_loss = total_d_loss / len(loader)
             avg_a_loss = total_a_loss / len(loader)
-            history[phase]["loss"].append(avg_loss)
             history[phase]["d_loss"].append(avg_d_loss)
             history[phase]["a_loss"].append(avg_a_loss)
 
@@ -178,7 +161,7 @@ def train_finetune(args):
             precision, recall, f1, _ = precision_recall_fscore_support(all_targets, all_preds, average="macro")
             with open(csv_path, mode='a', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow([epoch+1, phase, avg_loss, avg_d_loss, avg_a_loss, avg_acc if phase=="val" else "", avg_mae if phase=="val" else "", precision, recall, f1])
+                writer.writerow([epoch+1, phase, avg_d_loss, avg_a_loss, avg_acc if phase=="val" else "", avg_mae if phase=="val" else "", precision if phase=="val" else "", recall if phase=="val" else "", f1 if phase=="val" else ""])
 
         # 主 loss 曲线
         plt.figure()
@@ -195,6 +178,7 @@ def train_finetune(args):
         plt.title("Train-Val Loss Curve")
         plt.savefig(figures_dir / f"loss_curve_epoch{epoch+1}.png")
         plt.close()
+
 
         # 两两画图
         def save_pair_plot(train_list, val_list, name):
@@ -225,13 +209,14 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--clip_grad', type=float, default=1.0)
-    parser.add_argument('--use_fp16', action='store_true')
     parser.add_argument('--train_mode', type=str, choices=['linear', 'finetune'], default='finetune',
                         help="Training mode: linear (linear probing) or finetune (full fine-tuning)")
+    parser.add_argument('--finetune_type', type=int, default=0, choices=[0, 1,2,3])
 
     args = parser.parse_args()
     args.train_data_path = "../dino_data/dino_sequence_data/finetune_train.pt"
     args.val_data_path = "../dino_data/dino_sequence_data/finetune_val.pt"
-    args.pretrained_weights = f"../dino_data/output_dino/{'pretrain_'}/weights/student_pretrain_epoch{50}.pth"
+    args.pretrained_weights ="../dino_data/weights/20:100epoch pretrain/student_epoch20.pth"
     args.output_dir = "../dino_data/output_dino"
+    args.finetune_type = 0  # 0: 全局 cls, 1: 最后几个 A/S
     train_finetune(args)

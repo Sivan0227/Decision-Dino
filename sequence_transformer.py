@@ -69,6 +69,8 @@ class ASDTransformer(nn.Module):
             nn.LayerNorm(embed_dim*4),
             nn.Linear(embed_dim*4, 1)  # 回归
         )
+        self.sigma_decision = nn.Parameter(torch.tensor(1.0))
+        self.sigma_action = nn.Parameter(torch.tensor(1.0))
 
     def forward(self, a_tensor,s_tensor, d_tensor, a_idx, s_idx, d_idx, mask, finetune_type=0):
         """
@@ -141,10 +143,7 @@ class ASDTransformer(nn.Module):
                 decision_logits = self.decision_head(cls_output)
                 action_pred = self.action_head(cls_output)
 
-                return {
-                    "decision_logits": decision_logits,
-                    "action_pred": action_pred
-                }
+                return decision_logits,action_pred
                 
             elif finetune_type == 1:
                 """策略2：用全局cls和最后的几个 A/S"""
@@ -176,10 +175,7 @@ class ASDTransformer(nn.Module):
                 decision_logits = self.decision_head_combined(combined)
                 action_pred = self.action_head_combined(combined)
 
-                return {
-                    "decision_logits": decision_logits,
-                    "action_pred": action_pred
-                }
+                return decision_logits,action_pred
             
             elif finetune_type == 2:
                 """策略3：所有的 A/S/D 加入复杂transformer"""
@@ -191,10 +187,7 @@ class ASDTransformer(nn.Module):
                 decision_logits = self.decision_head(pooled)
                 action_pred = self.action_head(pooled)
 
-                return {
-                    "decision_logits": decision_logits,
-                    "action_pred": action_pred
-                }
+                return decision_logits,action_pred
             
             elif finetune_type == 3:
                 """策略4：用全局cls和所有的 A/S/D 加入复杂transform"""
@@ -206,7 +199,5 @@ class ASDTransformer(nn.Module):
                 decision_logits = self.decision_head(pooled)
                 action_pred = self.action_head(pooled)
 
-                return {
-                    "decision_logits": decision_logits,
-                    "action_pred": action_pred
-                }
+                return decision_logits,action_pred
+                
