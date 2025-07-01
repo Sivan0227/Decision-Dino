@@ -14,6 +14,10 @@ class DinoSequenceDataset(Dataset):
 
     def __len__(self):
         return len(self.data)
+    
+    def encode_type_id(self, seq):
+        type_id_map = {"A": 0, "S": 1, "D": 2}
+        return [type_id_map.get(token["type"], -1) for token in seq]  # -1 表示 PAD，用 mask 区分
 
     def pad_left(self, seq, target_len):
         pad_len = target_len - len(seq)
@@ -25,6 +29,41 @@ class DinoSequenceDataset(Dataset):
         padded = pad_token * int(pad_len/3) + seq
         mask = [0] * pad_len + [1] * len(seq)
         return padded[-target_len:], mask[-target_len:]
+    
+    def value_to_tensor(self, seq):
+        value_list = []
+        A_idx, S_idx, D_idx = [], [], []
+        for i, token in enumerate(seq):
+            t = token['type']
+            v = token['value']
+
+            if t == 'A':
+                val_tensor = torch.tensor([v], dtype=torch.float32)  # (1,)
+                A_idx.append(i)
+
+            elif t == 'S':
+                dis = torch.tensor(v['dis'], dtype=torch.float32)  # (10,)
+                vel = torch.tensor(v['v'], dtype=torch.float32)    # (3,)
+                val_tensor = torch.cat([dis, vel]).view(-1)       # (13,)
+                S_idx.append(i)
+
+            elif t == 'D':
+                val_tensor = torch.tensor(v, dtype=torch.long)   # (1,)
+                D_idx.append(i)
+
+            else:
+                print(f"[Warning] Unknown token type: {t}, using zero tensor as fallback")
+                val_tensor = torch.zeros(1, dtype=torch.float32)
+
+            value_list.append(val_tensor)
+
+        type_idx = {
+            'A_idx': A_idx,
+            'S_idx': S_idx,
+            'D_idx': D_idx
+        }
+
+        return value_list, type_idx
 
     def __getitem__(self, idx):
         item = self.data[idx]
@@ -34,36 +73,64 @@ class DinoSequenceDataset(Dataset):
         exp_id = item['exp_id']
         ts = item['ts']
 
-        if self.mode == 'finetune':
-            max_tokens = self.max_student_tokens
+        max_tokens = self.max_teacher_tokens if self.mode != 'finetune' else self.max_student_tokens
+
+        padded_seq, mask = self.pad_left(token_seq[-max_tokens:], max_tokens)
+
+
+        # 学生
+        student_seq = padded_seq[:self.max_student_tokens]
+        student_mask = torch.tensor(mask[:self.max_student_tokens], dtype=torch.bool)
+        student_type_id = torch.tensor(self.encode_type_id(student_seq), dtype=torch.long)
+        student_values, student_type_idx = self.value_to_tensor(student_seq)
+
+        #分离 student A/S/D tensor
+        student_a_tensor = torch.stack([student_values[i] for i in student_type_idx['A_idx']]) if student_type_idx['A_idx'] else None
+        student_s_tensor = torch.stack([student_values[i] for i in student_type_idx['S_idx']]) if student_type_idx['S_idx'] else None
+        student_d_tensor = torch.stack([student_values[i] for i in student_type_idx['D_idx']]) if student_type_idx['D_idx'] else None
+
+        # 教师
+        if self.mode == 'pretrain':
+            teacher_seq = padded_seq
+            teacher_mask = torch.tensor(mask, dtype=torch.bool)
+            teacher_type_id = torch.tensor(self.encode_type_id(teacher_seq), dtype=torch.long)
+            teacher_values, teacher_type_idx = self.value_to_tensor(teacher_seq)
+
+            teacher_a_tensor = torch.stack([teacher_values[i] for i in teacher_type_idx['A_idx']]) if teacher_type_idx['A_idx'] else None
+            teacher_s_tensor = torch.stack([teacher_values[i] for i in teacher_type_idx['S_idx']]) if teacher_type_idx['S_idx'] else None
+            teacher_d_tensor = torch.stack([teacher_values[i] for i in teacher_type_idx['D_idx']]) if teacher_type_idx['D_idx'] else None
         else:
-            max_tokens = self.max_teacher_tokens
+            teacher_seq = teacher_mask = teacher_type_id = teacher_values = teacher_type_idx = None
+            teacher_a_tensor = teacher_s_tensor = teacher_d_tensor = None
 
-        raw_seq = token_seq[-max_tokens:]
-        input_len = max_tokens
-
-        padded_seq, mask = self.pad_left(raw_seq, input_len)
-
-        # student 是 teacher 的前段子序列
-        if self.mode == 'finetune':
-            student_seq, student_mask = padded_seq, mask
-            teacher_seq = teacher_mask = None
-        else:
-            student_seq, student_mask = padded_seq[:self.max_student_tokens], mask[:self.max_student_tokens]
-            teacher_seq, teacher_mask = padded_seq, mask
-
-        # 提取目标位置：student 最后位置的 D 和下一个的 A
+        # 提取目标 D/A
         d_index = self.max_student_tokens
         a_index = d_index + 1
         full_seq = padded_seq if self.mode != 'finetune' else token_seq
-        target_d = full_seq[d_index] if d_index < len(full_seq) and full_seq[d_index]['type'] == 'D' else None
-        target_a = full_seq[a_index] if a_index < len(full_seq) and full_seq[a_index]['type'] == 'A' else None
+
+        target_d, target_a, target_d_tensor, target_a_tensor = None, None, None, None
+
+        if d_index < len(full_seq) and full_seq[d_index]['type'] == 'D':
+            target_d = full_seq[d_index]
+            target_d_tensor = torch.tensor(target_d['value'], dtype=torch.long).view(1)
+
+        if a_index < len(full_seq) and full_seq[a_index]['type'] == 'A':
+            target_a = full_seq[a_index]
+            target_a_tensor = torch.tensor(target_a['value'], dtype=torch.float32).view(1)
 
         output = {
             "student_seq": student_seq,
+            "student_tensor": student_values,
             "student_mask": student_mask,
+            "student_type_id": student_type_id,
+            "student_type_idx": student_type_idx,
+            "student_a_tensor": student_a_tensor,
+            "student_s_tensor": student_s_tensor,
+            "student_d_tensor": student_d_tensor,
             "target_d": target_d,
             "target_a": target_a,
+            "target_d_tensor": target_d_tensor,
+            "target_a_tensor": target_a_tensor,
             "person_id": person_id,
             "exp_id": exp_id,
             "ts": ts
@@ -72,7 +139,13 @@ class DinoSequenceDataset(Dataset):
         if self.mode == 'pretrain':
             output.update({
                 "teacher_seq": teacher_seq,
+                "teacher_tensor": teacher_values,
                 "teacher_mask": teacher_mask,
+                "teacher_type_id": teacher_type_id,
+                "teacher_type_idx": teacher_type_idx,
+                "teacher_a_tensor": teacher_a_tensor,
+                "teacher_s_tensor": teacher_s_tensor,
+                "teacher_d_tensor": teacher_d_tensor
             })
 
         return output
@@ -87,13 +160,14 @@ if __name__ == "__main__":
         sample = pretrain_dataset[i]
     sample = pretrain_dataset[7]
     print("--------------len",len(sample['teacher_seq']),len(sample['student_seq']))
-    print("--------------teacher_seq:", sample['teacher_seq'])
-    print("----------------student_seq:", sample['student_seq'])
+    print("--------------teacher_seq:", sample['teacher_seq'][0])
+    print("----------------student_seq:", sample['student_seq'][-1])
     print("---------------target_d:", sample['target_d'])
     print("----------------target_a:", sample['target_a'])
-    print("----------------person_id:", sample['person_id'])
-    print("----------------exp_id:", sample['exp_id'])
-    print("----------------ts:", sample['ts'])
+    print("----------------student student_type_idx:", sample['student_type_idx'])
+    # print("----------------person_id:", sample['person_id'])
+    # print("----------------exp_id:", sample['exp_id'])
+    # print("----------------ts:", sample['ts'])
 
     # 加载 finetune 数据
 

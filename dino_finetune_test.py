@@ -22,20 +22,21 @@ def test_model(model, test_loader, device, criterion_decision, criterion_action)
 
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="Testing"):
-            student_seq = batch['student_seq']
-            student_mask = torch.stack(batch['student_mask']).to(device).bool()
+            s_a = batch['s_a'].to(device)
+            s_s = batch['s_s'].to(device)
+            s_d = batch['s_d'].to(device)
 
-            student_seq = [
-                [
-                    {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in token.items()}
-                    for token in sample
-                ]
-                for sample in student_seq
-            ]
+            s_a_idx = batch['s_a_idx'].to(device)
+            s_s_idx = batch['s_s_idx'].to(device)
+            s_d_idx = batch['s_d_idx'].to(device)
 
-            decision_logits, action_pred = model(student_seq, mask=student_mask)
-            d_loss = criterion_decision(decision_logits, batch['target_d'].to(device))
-            a_loss = criterion_action(action_pred.squeeze(), batch['target_a'].to(device).float())
+            student_mask = batch['student_mask'].to(device).bool()
+            target_d = batch['target_d'].to(device)
+            target_a = batch['target_a'].to(device).float()
+
+            decision_logits, action_pred = model(s_a, s_s, s_d, s_a_idx, s_s_idx, s_d_idx, student_mask)
+            d_loss = criterion_decision(decision_logits, target_d)
+            a_loss = criterion_action(action_pred.squeeze(),target_a)
             loss = d_loss + a_loss
 
             test_loss_total += loss.item()

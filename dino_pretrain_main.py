@@ -2,7 +2,7 @@ import os
 import csv
 import time
 import argparse
-import datetime
+from datetime import datetime
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -89,12 +89,21 @@ def clip_gradients(model, clip):
 
 def my_collate_fn(batch):
     return {
-        'student_seq': [item['student_seq'] for item in batch],
-        'student_mask': [item['student_mask'] for item in batch],
-        'teacher_seq': [item['teacher_seq'] for item in batch],
-        'teacher_mask': [item['teacher_mask'] for item in batch],
+        "s_a": torch.stack([item['student_a_tensor'] for item in batch]),
+        "s_s": torch.stack([item['student_s_tensor'] for item in batch]), 
+        "s_d": torch.stack([item['student_d_tensor'] for item in batch]),  
+        "t_a": torch.stack([item['teacher_a_tensor'] for item in batch]) ,
+        "t_s": torch.stack([item['teacher_s_tensor'] for item in batch]) ,
+        "t_d": torch.stack([item['teacher_d_tensor'] for item in batch]) ,
+        "s_a_idx": torch.tensor(batch[0]["student_type_idx"]["A_idx"], dtype=torch.long),
+        "s_s_idx": torch.tensor(batch[0]["student_type_idx"]["S_idx"], dtype=torch.long),
+        "s_d_idx": torch.tensor(batch[0]["student_type_idx"]["D_idx"], dtype=torch.long),
+        "t_a_idx": torch.tensor(batch[0]["teacher_type_idx"]["A_idx"], dtype=torch.long) ,
+        "t_s_idx": torch.tensor(batch[0]["teacher_type_idx"]["S_idx"], dtype=torch.long) ,
+        "t_d_idx": torch.tensor(batch[0]["teacher_type_idx"]["D_idx"], dtype=torch.long) ,
+        "student_mask": torch.stack([item['student_mask'] for item in batch]),
+        "teacher_mask": torch.stack([item['teacher_mask'] for item in batch])
     }
-
 
 # ============ 主训练函数 ============
 def train_dino(args):
@@ -163,29 +172,29 @@ def train_dino(args):
 
         pbar = tqdm(dataloader, desc=f"Epoch [{epoch+1}/{args.epochs}]", leave=False)
         for it, batch in enumerate(pbar):
-            student_seq = batch['student_seq']
-            teacher_seq = batch['teacher_seq']
+            s_a = batch['s_a'].to(device)
+            s_s = batch['s_s'].to(device)
+            s_d = batch['s_d'].to(device)
 
-            student_mask = torch.tensor(batch['student_mask'], dtype=torch.bool).to(device)
-            teacher_mask = torch.tensor(batch['teacher_mask'], dtype=torch.bool).to(device)
+            t_a = batch['t_a'].to(device)
+            t_s = batch['t_s'].to(device) 
+            t_d = batch['t_d'].to(device) 
 
-            student_seq = [
-                            [
-                                {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in token.items()}
-                                for token in sample
-                            ]
-                            for sample in student_seq ]
+            s_a_idx = batch['s_a_idx'].to(device)
+            s_s_idx = batch['s_s_idx'].to(device)
+            s_d_idx = batch['s_d_idx'].to(device)
 
-            teacher_seq = [
-                            [
-                                {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in token.items()}
-                                for token in sample
-                            ]
-                            for sample in teacher_seq  ]
+            t_a_idx = batch['t_a_idx'].to(device) 
+            t_s_idx = batch['t_s_idx'].to(device) 
+            t_d_idx = batch['t_d_idx'].to(device) 
+
+            student_mask = batch['student_mask'].to(device).bool()
+            teacher_mask = batch['teacher_mask'].to(device).bool()
+
             if scaler:
                 with autocast():
-                    s_out = student(student_seq, mask=student_mask)
-                    t_out = teacher(teacher_seq, mask=teacher_mask)
+                    s_out = student(s_a, s_s, s_d, s_a_idx, s_s_idx, s_d_idx, student_mask)
+                    t_out = teacher(t_a, t_s, t_d, t_a_idx, t_s_idx, t_d_idx, teacher_mask)
                     loss = dino_loss(s_out, t_out, epoch)
                     student_var = s_out.var(dim=1).mean().item()  # [B, D] → scalar
                     teacher_var = t_out.var(dim=1).mean().item()
@@ -200,8 +209,8 @@ def train_dino(args):
                 scaler.update()
                 optimizer.zero_grad()
             else:
-                s_out = student(student_seq, mask=student_mask)
-                t_out = teacher(teacher_seq, mask=teacher_mask)
+                s_out = student(s_a, s_s, s_d, s_a_idx, s_s_idx, s_d_idx, student_mask)
+                t_out = teacher(t_a, t_s, t_d, t_a_idx, t_s_idx, t_d_idx, teacher_mask)
                 # print("s_out:", s_out.shape, "t_out:", t_out.shape)
                 loss = dino_loss(s_out, t_out, epoch)
                 student_var = s_out.var(dim=1).mean().item()  # [B, D] → scalar

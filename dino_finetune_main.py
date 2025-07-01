@@ -26,6 +26,19 @@ def my_collate_fn(batch):
         "target_a": [item["target_a"] for item in batch],
     }
 
+def my_collate_fn(batch):
+    return {
+        "s_a": torch.stack([item['student_a_tensor'] for item in batch]),
+        "s_s": torch.stack([item['student_s_tensor'] for item in batch]), 
+        "s_d": torch.stack([item['student_d_tensor'] for item in batch]),  
+        "s_a_idx": torch.tensor(batch[0]["student_type_idx"]["A_idx"], dtype=torch.long),
+        "s_s_idx": torch.tensor(batch[0]["student_type_idx"]["S_idx"], dtype=torch.long),
+        "s_d_idx": torch.tensor(batch[0]["student_type_idx"]["D_idx"], dtype=torch.long),
+        "student_mask": torch.stack([item['student_mask'] for item in batch]),
+        "target_d": torch.stack([item['target_d'] for item in batch]),
+        "target_a": torch.stack([item['target_a'] for item in batch]),
+    }
+
 def train_finetune(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -95,16 +108,22 @@ def train_finetune(args):
 
             pbar = tqdm(loader, desc=f"{phase.capitalize()} Epoch {epoch+1}/{args.epochs}")
             for batch in pbar:
-                student_seq = batch['student_seq']
-                student_mask = torch.stack(batch['student_mask']).to(device).bool()
-                student_seq = [[{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in token.items()} for token in sample] for sample in student_seq]
-                target_d = torch.tensor(batch['target_d'], dtype=torch.long).to(device)
-                target_a = torch.tensor(batch['target_a'], dtype=torch.float32).to(device).view(-1,1)
+                s_a = batch['s_a'].to(device)
+                s_s = batch['s_s'].to(device)
+                s_d = batch['s_d'].to(device)
+
+                s_a_idx = batch['s_a_idx'].to(device)
+                s_s_idx = batch['s_s_idx'].to(device)
+                s_d_idx = batch['s_d_idx'].to(device)
+
+                student_mask = batch['student_mask'].to(device).bool()
+                target_d = batch['target_d'].to(device)
+                target_a = batch['target_a'].to(device).float()
 
                 with torch.set_grad_enabled(phase == "train"):
                     if scaler and phase == "train":
                         with autocast():
-                            d_out, a_out = student(student_seq, mask=student_mask)
+                            d_out, a_out = student(s_a, s_s, s_d, s_a_idx, s_s_idx, s_d_idx, student_mask)
                             d_loss = ce_loss_fn(d_out, target_d)
                             a_loss = mse_loss_fn(a_out, target_a)
                             loss = d_loss + a_loss
@@ -112,7 +131,7 @@ def train_finetune(args):
                         scaler.step(optimizer)
                         scaler.update()
                     else:
-                        d_out, a_out = student(student_seq, mask=student_mask)
+                        d_out, a_out = student(s_a, s_s, s_d, s_a_idx, s_s_idx, s_d_idx, student_mask)
                         d_loss = ce_loss_fn(d_out, target_d)
                         a_loss = mse_loss_fn(a_out, target_a)
                         loss = d_loss + a_loss

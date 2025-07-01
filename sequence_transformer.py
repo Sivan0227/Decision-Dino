@@ -51,70 +51,95 @@ class ASDTransformer(nn.Module):
             nn.LayerNorm(embed_dim),
             nn.Linear(embed_dim, 1)  # 回归
         )
+        self.decision_head_combined = nn.Sequential(
+            nn.LayerNorm(embed_dim*3),
+            nn.Linear(embed_dim*3, num_decision_classes)  # 分类
+        )
 
-    def forward(self, input_tokens,mask=None):
+        self.action_head_combined = nn.Sequential(
+            nn.LayerNorm(embed_dim*3),
+            nn.Linear(embed_dim*3, 1)  # 回归
+        )
+
+    def forward(self, a_tensor,s_tensor, d_tensor, a_idx, s_idx, d_idx, mask, finetune_use_combined=False):
         """
-        input_tokens: [B, T] of list of dicts with keys: type, value
+        Args:
+            a_tensor: (total_A, 1)
+            s_tensor: (total_S, 13)
+            d_tensor: (total_D, 1)
+            a_idx: (total_A, 2) [batch_idx, token_idx]
+            s_idx: (total_S, 2)
+            d_idx: (total_D, 2)
+            mask: (B, T) bool
+            finetune_use_combined: bool
+
+        Returns:
+            output: (B, D) if not finetune_use_combined else (B, T+1, D)
         """
-        B, T = len(input_tokens), len(input_tokens[0])
-        device = self.cls_token.device
+        B, T = mask.shape
+        device = a_tensor.device
 
-        # === Token embedding ===
-        embeds = []
-        for batch in input_tokens:
-            embed_seq = []
-            for token in batch:
-                if token['type'][0] == 'A':
-                    val = torch.tensor(token['value'], dtype=torch.float32, device=device).view(1, 1)
-                    embed = self.action_embed(val)
-                elif token['type'][0] == 'S':
-                    dis = torch.tensor(token['value']['dis'], dtype=torch.float32, device=device).view(1, -1)
-                    v = torch.tensor(token['value']['v'], dtype=torch.float32, device=device).view(1, -1)
-                    embed = self.dis_embed(dis) + self.v_embed(v)
-                elif token['type'][0] == 'D':
-                    val = torch.tensor(token['value'], dtype=torch.long, device=device).view(1)
-                    embed = self.decision_embed(val)
-                else:  # PAD or unknown
-                    embed = torch.zeros(1, self.embed_dim, device=device)
-                embed_seq.append(embed)
-            embed_seq = torch.cat(embed_seq, dim=0)  # [T, D]
-            embeds.append(embed_seq)
+        x = torch.zeros(B, T, self.embed_dim, device=device)
 
-        x = torch.stack(embeds, dim=0)  # [B, T, D]
+        if a_idx.numel() > 0:
+            A_embed = self.action_embed(a_tensor)
+            _, T_a, _ = A_embed.shape
+            batch_idx = torch.arange(B, device=A_embed.device).view(B, 1).expand(B, T_a)  # [32, 30]
 
-        # === Positional embedding ===
-        x = x + self.pos_embed[:, :x.size(1), :]
+            # 放入 x
+            x[batch_idx, a_idx] = A_embed
 
-        # === CLS token prepend ===
-        cls_tokens = self.cls_token.expand(B, -1, -1)  # [B, 1, D]
-        x = torch.cat((cls_tokens, x), dim=1)  # [B, T+1, D]
+        if s_idx.numel() > 0:
+            S_dis = s_tensor[:, :, :10]
+            S_v = s_tensor[:, :, 10:]
+            S_embed = self.dis_embed(S_dis) + self.v_embed(S_v)
+            _, T_s, _ = S_embed.shape
+            batch_idx = torch.arange(B, device=S_embed.device).view(B, 1).expand(B, T_s)  # [32, 30]
+            # 放入 x
+            x[batch_idx, s_idx] = S_embed
 
-        if mask is not None:
-            # mask: batch x seq_len → 加一列 False 给 cls
-            cls_mask = torch.zeros(mask.size(0), 1, dtype=torch.bool, device=mask.device)
-            full_mask = torch.cat((cls_mask, mask == 0), dim=1)  # True 表示 padding
-        else:
-            full_mask = None
 
-        # x shape: (B, T+1, D)
-        x = x.transpose(0, 1)  # → (T+1, B, D)
+        if d_idx.numel() > 0:
+            D_embed = self.decision_embed(d_tensor)
+            _, T_d, _ = D_embed.shape
+            batch_idx = torch.arange(B, device=D_embed.device).view(B, 1).expand(B, T_d)  # [32, 30]
+            # 放入 x
+            x[batch_idx, d_idx] = D_embed
 
+        # 拼接 cls token
+        cls_token = self.cls_token.expand(B, -1, -1)  # (B, 1, D)
+        x = torch.cat((cls_token, x), dim=1)
+
+        # 拼接 mask
+        cls_mask = torch.zeros(B, 1, dtype=torch.bool, device=device)
+        full_mask = torch.cat((cls_mask, ~mask), dim=1)
+
+        # 编码器
+        x = x.transpose(0, 1)  # (T+1, B, D)
         x = self.transformer(x, src_key_padding_mask=full_mask)
-
-        x = x.transpose(0, 1)  # → 回到 (B, T+1, D)
-
+        x = x.transpose(0, 1)  # (B, T+1, D)
 
         # === Output ===
         cls_output = x[:, 0, :]  # [B, T+1]
+        last_a = x[:, -2, :]  # (B, D)
+        last_s = x[:, -1, :]  # (B, D)
 
 
         if self.mode == "pretrain":
             return cls_output
 
         else:  # "finetune"
-            decision_logits = self.decision_head(cls_output)
-            action_pred = self.action_head(cls_output)
-            return {
-                "decision_logits": decision_logits,
-                "action_pred": action_pred
-            }
+            if finetune_use_combined:
+                """策略1"""
+                new_output = torch.cat([cls_output, last_a, last_s], dim=-1)
+                decision_logits = self.decision_head_combined(new_output)
+                action_pred = self.action_head_combined(new_output)
+                return {
+                    "decision_logits": decision_logits,
+                    "action_pred": action_pred
+                }
+            else:
+                """策略2"""
+                decision_logits = self.decision_head(cls_output)
+                action_pred = self.action_head(cls_output)
+                return decision_logits, action_pred
