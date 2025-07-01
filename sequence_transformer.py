@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import math
 
 class ASDTransformer(nn.Module):
     def __init__(self, 
@@ -41,6 +40,18 @@ class ASDTransformer(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=depth)
 
+        # === Finetune aggregator ===
+        finetune_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=6,
+            dropout=dropout,
+            dim_feedforward=embed_dim * 2,  # 保持轻量
+            activation='gelu',
+            batch_first=True  # 确保输入 [B, T, D]
+        )
+        self.finetune_transformer = nn.TransformerEncoder(finetune_encoder_layer, num_layers=3)
+        self.finetune_norm = nn.LayerNorm(embed_dim)
+
         # === Output heads ===
         self.decision_head = nn.Sequential(
             nn.LayerNorm(embed_dim),
@@ -52,16 +63,16 @@ class ASDTransformer(nn.Module):
             nn.Linear(embed_dim, 1)  # 回归
         )
         self.decision_head_combined = nn.Sequential(
-            nn.LayerNorm(embed_dim*3),
-            nn.Linear(embed_dim*3, num_decision_classes)  # 分类
+            nn.LayerNorm(embed_dim*4),
+            nn.Linear(embed_dim*4, num_decision_classes)  # 分类
         )
 
         self.action_head_combined = nn.Sequential(
-            nn.LayerNorm(embed_dim*3),
-            nn.Linear(embed_dim*3, 1)  # 回归
+            nn.LayerNorm(embed_dim*4),
+            nn.Linear(embed_dim*4, 1)  # 回归
         )
 
-    def forward(self, a_tensor,s_tensor, d_tensor, a_idx, s_idx, d_idx, mask, finetune_use_combined=False):
+    def forward(self, a_tensor,s_tensor, d_tensor, a_idx, s_idx, d_idx, mask, finetune_type=0):
         """
         Args:
             a_tensor: (total_A, 1)
@@ -120,26 +131,84 @@ class ASDTransformer(nn.Module):
         x = x.transpose(0, 1)  # (B, T+1, D)
 
         # === Output ===
-        cls_output = x[:, 0, :]  # [B, T+1]
-        last_a = x[:, -2, :]  # (B, D)
-        last_s = x[:, -1, :]  # (B, D)
+        cls_output = x[:, 0, :]  # [B, D]
 
 
         if self.mode == "pretrain":
             return cls_output
 
         else:  # "finetune"
-            if finetune_use_combined:
-                """策略1"""
-                new_output = torch.cat([cls_output, last_a, last_s], dim=-1)
-                decision_logits = self.decision_head_combined(new_output)
-                action_pred = self.action_head_combined(new_output)
+            if  finetune_type == 0:
+                """策略1：用全局cls"""
+                decision_logits = self.decision_head(cls_output)
+                action_pred = self.action_head(cls_output)
+
                 return {
                     "decision_logits": decision_logits,
                     "action_pred": action_pred
                 }
-            else:
-                """策略2"""
-                decision_logits = self.decision_head(cls_output)
-                action_pred = self.action_head(cls_output)
-                return decision_logits, action_pred
+                
+            elif finetune_type == 1:
+                """策略2：用全局cls和最后的几个 A/S"""
+                last_sec = 1
+                last_seq = last_sec*10*3 -1
+                last_x = x[:, -last_seq:, :]  # (B, 29, D)
+                mask_a = torch.zeros(B, T+1, dtype=torch.bool, device=device)
+                mask_s = torch.zeros(B, T+1, dtype=torch.bool, device=device)
+                mask_d = torch.zeros(B, T+1, dtype=torch.bool, device=device)
+
+                # 假设 s_a_idx: (total_A, 2)
+                if a_idx.numel() > 0:
+                    mask_a[a_idx[:,0], a_idx[:,1]] = True
+                if s_idx.numel() > 0:
+                    mask_s[s_idx[:,0], s_idx[:,1]] = True
+                if d_idx.numel() > 0:
+                    mask_d[d_idx[:,0], d_idx[:,1]] = True
+
+                # 截取最后 29
+                mask_a = mask_a[:, -last_seq:]
+                mask_s = mask_s[:, -last_seq:]
+                mask_d = mask_d[:, -last_seq:]
+
+                last_a = (last_x * mask_a.unsqueeze(-1).float()).sum(1) / (mask_a.sum(1, keepdim=True).clamp(min=1e-6))
+                last_s = (last_x * mask_s.unsqueeze(-1).float()).sum(1) / (mask_s.sum(1, keepdim=True).clamp(min=1e-6))
+                last_d = (last_x * mask_d.unsqueeze(-1).float()).sum(1) / (mask_d.sum(1, keepdim=True).clamp(min=1e-6))
+
+                combined = torch.cat([cls_output, last_a, last_s, last_d], dim=-1)  # (B, 4D)
+                decision_logits = self.decision_head_combined(combined)
+                action_pred = self.action_head_combined(combined)
+
+                return {
+                    "decision_logits": decision_logits,
+                    "action_pred": action_pred
+                }
+            
+            elif finetune_type == 2:
+                """策略3：所有的 A/S/D 加入复杂transformer"""
+                agg_out = self.finetune_transformer(x[:, 1:, :], src_key_padding_mask = full_mask[:, 1:])  # 去掉 cls token
+                agg_out = self.finetune_norm(agg_out)
+                valid_mask = ~full_mask  # (B, T+1)，True 表示有效
+                valid_mask = valid_mask.unsqueeze(-1).float()  # (B, T+1, 1)
+                pooled = (agg_out * valid_mask).sum(1) / valid_mask.sum(1).clamp(min=1e-6)  # (B, D)
+                decision_logits = self.decision_head(pooled)
+                action_pred = self.action_head(pooled)
+
+                return {
+                    "decision_logits": decision_logits,
+                    "action_pred": action_pred
+                }
+            
+            elif finetune_type == 3:
+                """策略4：用全局cls和所有的 A/S/D 加入复杂transform"""
+                agg_out = self.finetune_transformer(x, src_key_padding_mask = full_mask)  # 去掉 cls token
+                agg_out = self.finetune_norm(agg_out)
+                valid_mask = ~full_mask  # (B, T+1)，True 表示有效
+                valid_mask = valid_mask.unsqueeze(-1).float()  # (B, T+1, 1)
+                pooled = (agg_out * valid_mask).sum(1) / valid_mask.sum(1).clamp(min=1e-6)  # (B, D)
+                decision_logits = self.decision_head(pooled)
+                action_pred = self.action_head(pooled)
+
+                return {
+                    "decision_logits": decision_logits,
+                    "action_pred": action_pred
+                }
