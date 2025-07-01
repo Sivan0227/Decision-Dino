@@ -28,6 +28,52 @@ if torch.cuda.is_available():
     cudnn.benchmark = True
 
 
+# ============ VICRegLoss 内联定义 ============
+class VICRegLoss(nn.Module):
+    def __init__(self, sim_coeff=25.0, std_coeff=25.0, cov_coeff=1.0):
+        super().__init__()
+        self.sim_coeff = sim_coeff
+        self.std_coeff = std_coeff
+        self.cov_coeff = cov_coeff
+
+    def forward(self, x, y):
+        """
+        x, y: [B, D] 特征向量
+        """
+        # === Invariance loss ===
+        sim_loss = F.mse_loss(x, y)
+
+        # === Variance loss ===
+        std_x = torch.sqrt(x.var(dim=0) + 1e-04)
+        std_y = torch.sqrt(y.var(dim=0) + 1e-04)
+        std_loss = torch.mean(F.relu(1 - std_x)) + torch.mean(F.relu(1 - std_y))
+
+        # === Covariance loss ===
+        x = x - x.mean(dim=0)
+        y = y - y.mean(dim=0)
+
+        cov_x = (x.T @ x) / (x.shape[0] - 1)
+        cov_y = (y.T @ y) / (y.shape[0] - 1)
+
+        cov_loss = (
+            self.off_diagonal(cov_x).pow(2).sum() / x.shape[1]
+            + self.off_diagonal(cov_y).pow(2).sum() / y.shape[1]
+        )
+
+        loss = (
+            self.sim_coeff * sim_loss +
+            self.std_coeff * std_loss +
+            self.cov_coeff * cov_loss
+        )
+        return loss
+
+    @staticmethod
+    def off_diagonal(x):
+        n, m = x.shape
+        assert n == m
+        return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
+
+
 # ============ DINOLoss 内联定义 ============
 class DINOLoss(nn.Module):
     def __init__(self, out_dim, ncrops, warmup_teacher_temp, teacher_temp,
@@ -152,6 +198,8 @@ def train_dino(args):
         nepochs=args.epochs,
     ).to(device)
 
+    vicreg_loss_fn = VICRegLoss().to(device)
+
     # ---- 优化器 ----
     params_groups = [
         {"params": [p for n, p in student.named_parameters() if p.requires_grad and ("bias" not in n) and ("norm" not in n)], "weight_decay": 0.05},
@@ -197,7 +245,9 @@ def train_dino(args):
                 with autocast():
                     s_out = student(s_a, s_s, s_d, s_a_idx, s_s_idx, s_d_idx, student_mask)
                     t_out = teacher(t_a, t_s, t_d, t_a_idx, t_s_idx, t_d_idx, teacher_mask)
-                    loss = dino_loss(s_out, t_out, epoch)
+                    dinoloss = dino_loss(s_out, t_out, epoch)
+                    vicreg_loss = vicreg_loss_fn(s_out, t_out)
+                    loss = dinoloss + vicreg_loss
                     student_var = s_out.var(dim=1).mean().item()  # [B, D] → scalar
                     teacher_var = t_out.var(dim=1).mean().item()
                     student_variances.append(student_var)
@@ -214,7 +264,9 @@ def train_dino(args):
                 s_out = student(s_a, s_s, s_d, s_a_idx, s_s_idx, s_d_idx, student_mask)
                 t_out = teacher(t_a, t_s, t_d, t_a_idx, t_s_idx, t_d_idx, teacher_mask)
                 # print("s_out:", s_out.shape, "t_out:", t_out.shape)
-                loss = dino_loss(s_out, t_out, epoch)
+                dinoloss = dino_loss(s_out, t_out, epoch)
+                vicreg_loss = vicreg_loss_fn(s_out, t_out)
+                loss = dinoloss + vicreg_loss
                 student_var = s_out.var(dim=1).mean().item()  # [B, D] → scalar
                 teacher_var = t_out.var(dim=1).mean().item()
                 student_variances.append(student_var)
