@@ -234,7 +234,7 @@ def train_dino(args):
             pbar.set_postfix(loss=loss.item())
 
         avg_loss = total_loss / len(dataloader)
-        writer.add_scalar("Loss/train", avg_loss, epoch)
+
         print(f"Epoch [{epoch+1}/{args.epochs}], Loss: {avg_loss:.4f}")
         loss_curve.append(avg_loss)
 
