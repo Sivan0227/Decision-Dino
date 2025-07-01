@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader,random_split
 from torch.cuda.amp import GradScaler, autocast
 from pathlib import Path
 import time
-import datetime
+from datetime import datetime
 import matplotlib.pyplot as plt
 import csv
 import argparse
