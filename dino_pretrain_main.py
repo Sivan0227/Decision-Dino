@@ -170,6 +170,8 @@ def train_dino(args):
         student_variances = []
         teacher_variances = []
 
+        epoch_loss = []
+
         pbar = tqdm(dataloader, desc=f"Epoch [{epoch+1}/{args.epochs}]", leave=False)
         for it, batch in enumerate(pbar):
             s_a = batch['s_a'].to(device)
@@ -231,6 +233,7 @@ def train_dino(args):
                     param_k.data.mul_(m).add_((1. - m) * param_q.data)
 
             total_loss += loss.item()
+            epoch_loss.append(loss.item())
             pbar.set_postfix(loss=loss.item())
 
         avg_loss = total_loss / len(dataloader)
@@ -264,7 +267,7 @@ def train_dino(args):
         plt.title("Loss Curve".format(epoch + 1))
         plt.grid(True)
         plt.legend()
-        plt.savefig(figures_dir / f"loss_curve_epoch{epoch+1}.png")
+        plt.savefig(figures_dir / f"loss_until_epoch{epoch+1}.png")
         plt.close()
 
         # 2. Variance 曲线
@@ -276,7 +279,30 @@ def train_dino(args):
         plt.title("Variance Curve".format(epoch + 1))
         plt.grid(True)
         plt.legend()
-        plt.savefig(figures_dir / f"variance_curve_epoch{epoch+1}.png")
+        plt.savefig(figures_dir / f"variance_until_epoch{epoch+1}.png")
+        plt.close()
+
+        # 3.loss in one epoch
+        plt.figure()
+        plt.plot(epoch_loss, label='Loss in one epoch', color='tab:red')
+        plt.xlabel("Batch")
+        plt.ylabel("Loss")
+        plt.title(f"Loss in Epoch {epoch + 1}")
+        plt.grid(True)
+        plt.legend()
+        plt.savefig(figures_dir / f"loss_in_epoch_{epoch+1}.png")
+        plt.close()
+
+        # 3. variances in one epoch
+        plt.figure()
+        plt.plot(student_variances, label='Student Variance in this epoch', color='tab:purple')
+        plt.plot(teacher_variances, label='Teacher Variance in this epoch', color='tab:cyan')
+        plt.xlabel("Batch")
+        plt.ylabel("Variance")
+        plt.title(f"Variance in one Epoch {epoch + 1}")
+        plt.grid(True)
+        plt.legend()
+        plt.savefig(figures_dir / f"variance_in_epoch_{epoch+1}.png")
         plt.close()
 
     total_time = str(datetime.timedelta(seconds=int(time.time() - start_time)))
