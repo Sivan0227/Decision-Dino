@@ -69,8 +69,6 @@ class ASDTransformer(nn.Module):
             nn.LayerNorm(embed_dim*4),
             nn.Linear(embed_dim*4, 1)  # 回归
         )
-        self.sigma_decision = nn.Parameter(torch.tensor(1.0))
-        self.sigma_action = nn.Parameter(torch.tensor(1.0))
 
     def forward(self, a_tensor,s_tensor, d_tensor, a_idx, s_idx, d_idx, mask, finetune_type=0):
         """
