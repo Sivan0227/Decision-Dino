@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader,random_split
 from torch.cuda.amp import GradScaler, autocast
 from pathlib import Path
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import csv
 import argparse
@@ -86,7 +86,7 @@ def train_finetune(args):
         writer = csv.writer(f)
         writer.writerow(["epoch",'phase',"decision_loss", "action_loss", "accuracy", "mae", "precision", "recall", "f1"])
 
-    history = {"train": { "d_loss":[], "a_loss":[]}, "val": { "d_loss":[], "a_loss":[], "acc":[], "mae":[]}}
+    history = {"train":  { "d_loss":[], "a_loss":[], "acc":[], "mae":[], "f1":[], "precision":[], "recall":[]}, "val": { "d_loss":[], "a_loss":[], "acc":[], "mae":[], "f1":[], "precision":[], "recall":[]}}
 
 
     ce_loss_fn = nn.CrossEntropyLoss()
@@ -151,11 +151,13 @@ def train_finetune(args):
             history[phase]["d_loss"].append(avg_d_loss)
             history[phase]["a_loss"].append(avg_a_loss)
 
+            avg_acc = total_correct / total_samples
+            avg_mae = total_mae / total_samples
+            history[phase]["acc"].append(avg_acc)
+            history[phase]["mae"].append(avg_mae)
+
             if phase == "val":
-                avg_acc = total_correct / total_samples
-                avg_mae = total_mae / total_samples
-                history[phase]["acc"].append(avg_acc)
-                history[phase]["mae"].append(avg_mae)
+
                 cm = confusion_matrix(all_targets, all_preds)
                 plt.figure(figsize=(6,5))
                 sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
@@ -166,21 +168,24 @@ def train_finetune(args):
                 torch.save(student.state_dict(), ckpt_path)
 
             precision, recall, f1, _ = precision_recall_fscore_support(all_targets, all_preds, average="macro")
+            history[phase]["f1"].append(f1)
+            history[phase]["precision"] = precision
+            history[phase]["recall"] = recall
             with open(csv_path, mode='a', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow([epoch+1, phase, avg_d_loss, avg_a_loss, avg_acc if phase=="val" else "", avg_mae if phase=="val" else "", precision if phase=="val" else "", recall if phase=="val" else "", f1 if phase=="val" else ""])
+                writer.writerow([epoch+1, phase, avg_d_loss, avg_a_loss, avg_acc, avg_mae, precision, recall, f1])
 
         # acc 和 mae 曲线，train和val都画
         plt.figure()
-        plt.plot(history['train']['acc'], '--', label='Train Decision Accuracy')
+        plt.plot(history['train']['f1'], '--', label='Train Decision F1')
         plt.plot(history['train']['mae'], '--', label='Train Action MAE')
-        plt.plot(history['val']['acc'], ':', label='Validation Decision Accuracy')
+        plt.plot(history['val']['f1'], ':', label='Validation Decision F1')
         plt.plot(history['val']['mae'], ':', label='Validation Action MAE')
         plt.xlabel('Epoch')
         plt.ylabel('Metric')
         plt.legend()
         plt.grid(True)
-        plt.title("Decision Accuracy and Action MAE Curve")
+        plt.title("Decision F1 and Action MAE Curve")
         plt.savefig(figures_dir / f"acc_mae_curve_epoch{epoch+1}.png")
         plt.close()
 
@@ -204,8 +209,8 @@ def train_finetune(args):
         plt.plot(history['val']['d_loss'], '--', label='Validation Decision Loss')
         plt.plot(history['train']['a_loss'], ':', label='Train Action Loss')
         plt.plot(history['val']['a_loss'], ':', label='Validation Action Loss')
-        plt.plot(history['train']['acc'], label='Train Decision Accuracy')
-        plt.plot(history['val']['acc'], label='Validation Decision Accuracy')
+        plt.plot(history['train']['f1'], label='Train Decision F1')
+        plt.plot(history['val']['f1'], label='Validation Decision F1')
         plt.plot(history['train']['mae'], label='Train Action MAE')
         plt.plot(history['val']['mae'], label='Validation Action MAE')
         plt.xlabel('Epoch')
@@ -232,10 +237,10 @@ def train_finetune(args):
             plt.close()
         save_pair_plot(history['train']['d_loss'], history['val']['d_loss'], 'Decision Loss')
         save_pair_plot(history['train']['a_loss'], history['val']['a_loss'], 'Action Loss')
-        save_pair_plot(history['train']['acc'], history['val']['acc'], 'Decision Accuracy')
+        save_pair_plot(history['train']['f1'], history['val']['f1'], 'Decision F1')
         save_pair_plot(history['train']['mae'], history['val']['mae'], 'Action MAE')
 
-    total_time = str(datetime.timedelta(seconds=int(time.time() - start_time)))
+    total_time = str(timedelta(seconds=int(time.time() - start_time)))
     print(f"\nFinetuning complete in: {total_time}")
 
 if __name__ == "__main__":
@@ -258,7 +263,7 @@ if __name__ == "__main__":
     args = parser.parse_args([
     '--train_data_path', '../dino_data/dino_sequence_data/finetune_train.pt',
     '--val_data_path', '../dino_data/dino_sequence_data/finetune_val.pt',
-    '--pretrained_weights', '../dino_data/weights/20:100epoch pretrain/student_epoch20.pth',
+    '--pretrained_weights', '../dino_data/output_dino/pretrain1.0/weights/student_epoch100.pth',
     '--output_dir', '../dino_data/output_dino',
     '--finetune_type', '0'
     ])
