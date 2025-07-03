@@ -27,8 +27,8 @@ def my_collate_fn(batch):
         "s_s_idx": torch.tensor(batch[0]["student_type_idx"]["S_idx"], dtype=torch.long),
         "s_d_idx": torch.tensor(batch[0]["student_type_idx"]["D_idx"], dtype=torch.long),
         "student_mask": torch.stack([item['student_mask'] for item in batch]),
-        "target_d": torch.stack([item['target_d'] for item in batch]),
-        "target_a": torch.stack([item['target_a'] for item in batch]),
+        "target_d": torch.stack([item['target_d_tensor'] for item in batch]),
+        "target_a": torch.stack([item['target_a_tensor'] for item in batch]),
     }
 
 def train_finetune(args):
@@ -70,12 +70,10 @@ def train_finetune(args):
     optimizer = MTAdam(
         student.parameters(),
         lr=args.lr,
-        betas=(args.beta1, args.beta2),
-        eps=args.eps
-        )
+        ) if args.adam_type == "MTAdam" else optim.AdamW(params_groups, lr=args.lr)
 
     # === 路径和日志 ===
-    time_tag = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    time_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
     finetune_dir = Path(args.output_dir) / f"finetune_{args.train_mode}_{time_tag}"
     weights_dir = finetune_dir / "weights"
     figures_dir = finetune_dir / "figures"
@@ -120,17 +118,26 @@ def train_finetune(args):
                 with torch.set_grad_enabled(phase == "train"):
                     d_out, a_out = student(s_a, s_s, s_d, s_a_idx, s_s_idx, s_d_idx, student_mask)
                     # === 主任务 loss ===
-                    loss_decision = ce_loss_fn(d_out, target_d)
+                    loss_decision = ce_loss_fn(d_out, target_d.squeeze(-1).long())
                     loss_action = mse_loss_fn(a_out, target_a)
 
                     if phase == "train":
-                        loss_terms = [loss_decision, loss_action]
-                        optimizer.step(loss_terms)  # MTAdam 会自动调用 backward + update
+                        if args.adam_type == "MTAdam":
+                            loss_terms = [loss_decision, loss_action]
+                            ranks = [1,1]
+                            optimizer.step(loss_terms,ranks, None)  # MTAdam 会自动调用 backward + update
+                            optimizer.zero_grad()
+                        else:
+                            loss = loss_decision + loss_action
+                            loss.backward()
+                            clip_gradients(student, args.clip_grad)
+                            optimizer.step()
+                            optimizer.zero_grad()
 
                 total_d_loss += loss_decision.item()
                 total_a_loss += loss_action.item()
                 pred_class = torch.argmax(d_out, dim=1)
-                correct = (pred_class == target_d).sum().item()
+                correct = (pred_class == target_d.squeeze(-1)).sum().item()
                 total_correct += correct
                 total_samples += target_d.size(0)
                 mae = torch.mean(torch.abs(a_out.squeeze() - target_a.squeeze())).item()
@@ -163,21 +170,52 @@ def train_finetune(args):
                 writer = csv.writer(f)
                 writer.writerow([epoch+1, phase, avg_d_loss, avg_a_loss, avg_acc if phase=="val" else "", avg_mae if phase=="val" else "", precision if phase=="val" else "", recall if phase=="val" else "", f1 if phase=="val" else ""])
 
+        # acc 和 mae 曲线，train和val都画
+        plt.figure()
+        plt.plot(history['train']['acc'], '--', label='Train Decision Accuracy')
+        plt.plot(history['train']['mae'], '--', label='Train Action MAE')
+        plt.plot(history['val']['acc'], ':', label='Validation Decision Accuracy')
+        plt.plot(history['val']['mae'], ':', label='Validation Action MAE')
+        plt.xlabel('Epoch')
+        plt.ylabel('Metric')
+        plt.legend()
+        plt.grid(True)
+        plt.title("Decision Accuracy and Action MAE Curve")
+        plt.savefig(figures_dir / f"acc_mae_curve_epoch{epoch+1}.png")
+        plt.close()
+
         # 主 loss 曲线
         plt.figure()
-        plt.plot(history['train']['loss'], label='Train Loss')
-        plt.plot(history['val']['loss'], label='Val Loss')
-        plt.plot(history['train']['d_loss'], '--', label='Train D Loss')
-        plt.plot(history['val']['d_loss'], '--', label='Val D Loss')
-        plt.plot(history['train']['a_loss'], ':', label='Train A Loss')
-        plt.plot(history['val']['a_loss'], ':', label='Val A Loss')
+        plt.plot(history['train']['d_loss'], '--', label='Train Decision Loss')
+        plt.plot(history['val']['d_loss'], '--', label='Validation Decision Loss')
+        plt.plot(history['train']['a_loss'], ':', label='Train Action Loss')
+        plt.plot(history['val']['a_loss'], ':', label='Validation Action Loss')
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
         plt.legend()
         plt.grid(True)
-        plt.title("Train-Val Loss Curve")
+        plt.title("Finetune Loss Curves")
         plt.savefig(figures_dir / f"loss_curve_epoch{epoch+1}.png")
         plt.close()
+
+        # loss acc 和 mae 曲线画一起
+        plt.figure(figsize=(10, 6))
+        plt.plot(history['train']['d_loss'], '--', label='Train Decision Loss')
+        plt.plot(history['val']['d_loss'], '--', label='Validation Decision Loss')
+        plt.plot(history['train']['a_loss'], ':', label='Train Action Loss')
+        plt.plot(history['val']['a_loss'], ':', label='Validation Action Loss')
+        plt.plot(history['train']['acc'], label='Train Decision Accuracy')
+        plt.plot(history['val']['acc'], label='Validation Decision Accuracy')
+        plt.plot(history['train']['mae'], label='Train Action MAE')
+        plt.plot(history['val']['mae'], label='Validation Action MAE')
+        plt.xlabel('Epoch')
+        plt.ylabel('Metrics')
+        plt.legend()
+        plt.grid(True)
+        plt.title("Finetune Performance Curves")
+        plt.savefig(figures_dir / f"loss_acc_mae_curve_epoch{epoch+1}.png")
+        plt.close()
+        
 
 
         # 两两画图
@@ -189,12 +227,13 @@ def train_finetune(args):
             plt.ylabel(name)
             plt.legend()
             plt.grid(True)
-            plt.title(f'Train-Val {name} Curve')
+            plt.title(f'Finetune {name} Curve')
             plt.savefig(figures_dir / f"{name.lower()}_curve_epoch{epoch+1}.png")
             plt.close()
-        save_pair_plot(history['train']['loss'], history['val']['loss'], 'Loss')
         save_pair_plot(history['train']['d_loss'], history['val']['d_loss'], 'Decision Loss')
         save_pair_plot(history['train']['a_loss'], history['val']['a_loss'], 'Action Loss')
+        save_pair_plot(history['train']['acc'], history['val']['acc'], 'Decision Accuracy')
+        save_pair_plot(history['train']['mae'], history['val']['mae'], 'Action MAE')
 
     total_time = str(datetime.timedelta(seconds=int(time.time() - start_time)))
     print(f"\nFinetuning complete in: {total_time}")
@@ -211,12 +250,17 @@ if __name__ == "__main__":
     parser.add_argument('--clip_grad', type=float, default=1.0)
     parser.add_argument('--train_mode', type=str, choices=['linear', 'finetune'], default='finetune',
                         help="Training mode: linear (linear probing) or finetune (full fine-tuning)")
-    parser.add_argument('--finetune_type', type=int, default=0, choices=[0, 1,2,3])
+    parser.add_argument('--finetune_type', type=int, default=0, choices=[0, 1,2,3]) # 0: 全局 cls, 1: 最后几个 A/S
+    # adam type
+    parser.add_argument('--adam_type', type=str, default='AdamW', choices=['AdamW', 'MTAdam'],
+                        help="Optimizer type: AdamW, or MTAdam")
 
-    args = parser.parse_args()
-    args.train_data_path = "../dino_data/dino_sequence_data/finetune_train.pt"
-    args.val_data_path = "../dino_data/dino_sequence_data/finetune_val.pt"
-    args.pretrained_weights ="../dino_data/weights/20:100epoch pretrain/student_epoch20.pth"
-    args.output_dir = "../dino_data/output_dino"
-    args.finetune_type = 0  # 0: 全局 cls, 1: 最后几个 A/S
+    args = parser.parse_args([
+    '--train_data_path', '../dino_data/dino_sequence_data/finetune_train.pt',
+    '--val_data_path', '../dino_data/dino_sequence_data/finetune_val.pt',
+    '--pretrained_weights', '../dino_data/weights/20:100epoch pretrain/student_epoch20.pth',
+    '--output_dir', '../dino_data/output_dino',
+    '--finetune_type', '0'
+    ])
+
     train_finetune(args)

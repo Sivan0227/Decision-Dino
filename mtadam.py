@@ -75,8 +75,7 @@ class MTAdam(Optimizer):
           for p in group['params']:
 
             if p.grad is None:
-              print("breaking")
-              break
+                break
 
             if p.grad.is_sparse:
               raise RuntimeError('MTAdam does not support sparse gradients')
@@ -97,8 +96,11 @@ class MTAdam(Optimizer):
                   # Maintains max of all exp. moving avg. of sq. grad. values
                   state['max_exp_avg_sq'+str(j)] = torch.zeros_like(p.data)
 
-                if j == 0: p.norms = [torch.ones(1).cuda()]
-                else: p.norms.append(torch.ones(1).cuda())
+                device = p.data.device
+                if j == 0: 
+                    p.norms = [torch.ones(1, device=device)]
+                else: 
+                    p.norms.append(torch.ones(1, device=device))
 
             beta1, beta2, beta3 = group['betas']
 
@@ -149,16 +151,18 @@ class MTAdam(Optimizer):
               p.grad.detach_()
               p.grad.zero_()
 
-      for group in self.param_groups:
-        for p in group['params']:
-          temp = 0
-          max_denom = p.denom[0]
-          for index in range(1, len(p.exp_avg)):
-              max_denom = torch.max(max_denom, p.denom[index])
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    break
+                temp = 0
+                max_denom = p.denom[0]
+                for index in range(1, len(p.exp_avg)):
+                    max_denom = torch.max(max_denom, p.denom[index])
 
-          for index in range(len(p.exp_avg)):
-            update_step = -p.step_size[index]*(p.exp_avg[index]/max_denom)
-            temp += update_step
-          p.add_(temp)
+                for index in range(len(p.exp_avg)):
+                    update_step = -p.step_size[index]*(p.exp_avg[index]/max_denom)
+                    temp += update_step
+                p.add_(temp)
 
-      self.training_step += 1
+        self.training_step += 1

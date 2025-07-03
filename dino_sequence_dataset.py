@@ -171,14 +171,16 @@ if __name__ == "__main__":
 
     # 加载 finetune 数据
 
-    # finetune_dataset = DinoSequenceDataset("../dino_data/dino_sequence_data/finetune.pt", mode='finetune')
+    # finetune_dataset = DinoSequenceDataset("../dino_data/dino_sequence_data/finetune_train.pt", mode='finetune')
     # for i in range(100):
     #     sample = finetune_dataset[i]
     # sample = finetune_dataset[51]
     # print("--------------len",len(sample['student_seq']))
-    # print("----------------student_seq:", sample['student_seq'])
+    # print("----------------student_seq:", sample['student_seq'][89])
     # print("---------------target_d:", sample['target_d'])
+    # print("----------------target_d_tensor:", sample['target_d_tensor'])
     # print("----------------target_a:", sample['target_a'])
+    # print("----------------target_a_tensor:", sample['target_a_tensor'])
     # print("----------------person_id:", sample['person_id'])
     # print("----------------exp_id:", sample['exp_id'])
     # print("----------------ts:", sample['ts'])
