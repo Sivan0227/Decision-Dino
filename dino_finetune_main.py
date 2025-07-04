@@ -12,7 +12,7 @@ import argparse
 from tqdm import tqdm
 from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
 import seaborn as sns
-from mtadam import MTAdam  # 假设 MTAdam 已经实现并导入
+from mtadam import MTAdam
 
 from sequence_transformer import ASDTransformer
 from dino_sequence_dataset import DinoSequenceDataset
@@ -260,12 +260,21 @@ if __name__ == "__main__":
     parser.add_argument('--adam_type', type=str, default='AdamW', choices=['AdamW', 'MTAdam'],
                         help="Optimizer type: AdamW, or MTAdam")
 
+    # args = parser.parse_args([
+    # '--train_data_path', '../dino_data/dino_sequence_data/finetune_train.pt',
+    # '--val_data_path', '../dino_data/dino_sequence_data/finetune_val.pt',
+    # '--pretrained_weights', '../dino_data/weights/20:100epoch pretrain/student_epoch20.pth',
+    # '--output_dir', '../dino_data/output_dino',
+    # '--finetune_type', '0'
+    # ])
+
     args = parser.parse_args([
-    '--train_data_path', '../dino_data/dino_sequence_data/finetune_train.pt',
-    '--val_data_path', '../dino_data/dino_sequence_data/finetune_val.pt',
-    '--pretrained_weights', '../dino_data/output_dino/pretrain1.0/weights/student_epoch100.pth',
-    '--output_dir', '../dino_data/output_dino',
-    '--finetune_type', '0'
-    ])
+        '--train_data_path', '../dino_data/dino_sequence_data/finetune_train.pt',
+        '--val_data_path', '../dino_data/dino_sequence_data/finetune_val.pt',
+        '--pretrained_weights', '../dino_data/output_dino/pretrain1.0/weights/student_epoch100.pth',
+          '--output_dir', '../dino_data/output_dino',
+          '--finetune_type', '0'
+            ])
+
 
     train_finetune(args)

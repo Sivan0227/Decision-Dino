@@ -35,20 +35,21 @@ def test_model(model, test_loader, device, criterion_decision, criterion_action)
             target_a = batch['target_a'].to(device).float()
 
             decision_logits, action_pred = model(s_a, s_s, s_d, s_a_idx, s_s_idx, s_d_idx, student_mask)
-            d_loss = criterion_decision(decision_logits, target_d)
-            a_loss = criterion_action(action_pred.squeeze(),target_a)
+            d_loss = criterion_decision(decision_logits, target_d.squeeze(-1))
+            a_loss = criterion_action(action_pred,target_a)
             loss = d_loss + a_loss
 
             test_loss_total += loss.item()
 
             _, decision_pred = torch.max(decision_logits, 1)
-            test_decision_correct += (decision_pred == batch['target_d'].to(device)).sum().item()
-            test_decision_total += batch['target_d'].size(0)
+            test_decision_correct += (decision_pred == target_d.squeeze(-1)).sum().item()
+            test_decision_total += target_d.size(0)
 
-            test_action_error += torch.abs(action_pred.squeeze() - batch['target_a'].to(device).float()).sum().item()
+            test_action_error += torch.abs(action_pred - target_a).sum().item()
 
-            all_decisions.extend(batch['target_d'].cpu().numpy())
+            all_decisions.extend(target_d.numpy())
             all_decision_preds.extend(decision_pred.cpu().numpy())
+            
 
     avg_loss = test_loss_total / len(test_loader)
     acc = test_decision_correct / test_decision_total
@@ -106,8 +107,11 @@ if __name__ == "__main__":
     parser.add_argument('--weight_path', type=str, required=True, help='Path to finetuned model weights')
     parser.add_argument('--output_dir', type=str, required=True, help='Output directory for results')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
-    args = parser.parse_args()
-    args.test_data_path = "../dino_data/dino_sequence_data/finetune_test.pt"
-    args.weight_path = f"../dino_data/dino_sequence_data/{"finetune_"}/student_finetune_epoch{20}.pth"
-    args.output_dir = "../dino_data/output_dino"
+    args = parser.parse_args(
+        [
+            '--test_data_path', '../dino_data/dino_sequence_data/finetune_test.pt',
+            '--weight_path', '../dino_data/output_dino/finetune_epoch20 type0 epoch 20th/weights/student_finetune_epoch20.pth',
+            '--output_dir', '../dino_data/output_dino',
+        ]
+    )
     main(args)
