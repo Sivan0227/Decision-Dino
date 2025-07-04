@@ -51,7 +51,7 @@ def train_finetune(args):
     if args.train_mode == "linear":
         print("🔒 Linear Probing: Only training prediction heads...")
         for name, param in student.named_parameters():
-            if "decision_head" in name or "action_head" in name:
+            if "decision_head" in name or "action_head" in name or "finetune_transformer" in name or 'finetune_norm' in name:
                 param.requires_grad = True
             else:
                 param.requires_grad = False
