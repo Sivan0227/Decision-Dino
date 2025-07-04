@@ -272,8 +272,9 @@ if __name__ == "__main__":
         '--train_data_path', '../dino_data/dino_sequence_data/finetune_train.pt',
         '--val_data_path', '../dino_data/dino_sequence_data/finetune_val.pt',
         '--pretrained_weights', '../dino_data/output_dino/pretrain1.0/weights/student_epoch100.pth',
-          '--output_dir', '../dino_data/output_dino',
-          '--finetune_type', '0'
+        '--output_dir', '../dino_data/output_dino',
+        '--finetune_type', '0'
+        '--train_mode', 'linear',
             ])
 
 
